@@ -35,7 +35,7 @@ func TestProxyUpdateInvalidatesBoundProbeSnapshotsAndEnqueuesOutboxAtomically(t 
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(17)).AddRow(int64(18)))
 	mock.ExpectQuery(`(?s)SELECT id.*FROM accounts.*proxy_pool_ids`).
 		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(17)).AddRow(int64(18)))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)")).
 		WithArgs(service.SchedulerOutboxEventAccountBulkChanged, nil, nil, accountIDsPayloadMatcher{want: []int64{17, 18}}).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -78,7 +78,7 @@ func TestProxyUpdateRollsBackWhenProbeInvalidationOutboxFails(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(17)))
 	mock.ExpectQuery(`(?s)SELECT id.*FROM accounts.*proxy_pool_ids`).
 		WithArgs(int64(9)).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(17)))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)")).
 		WillReturnError(errors.New("outbox failed"))
 	mock.ExpectRollback()

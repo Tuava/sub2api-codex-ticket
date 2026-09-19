@@ -197,7 +197,7 @@ func updateProxyAndInvalidateProbeSnapshots(ctx context.Context, client *dbent.C
 	if err != nil {
 		return nil, err
 	}
-	referencingAccountIDs, err := accountIDsReferencingProxy(ctx, client, proxyIn.ID)
+	referencingAccountIDs, err := accountIDsReferencingProxyPool(ctx, client, proxyIn.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -241,15 +241,12 @@ func lockProxyProbeIdentity(ctx context.Context, client *dbent.Client, proxyID i
 	return identity, rows.Err()
 }
 
-func accountIDsReferencingProxy(ctx context.Context, exec sqlExecutor, proxyID int64) ([]int64, error) {
+func accountIDsReferencingProxyPool(ctx context.Context, exec sqlExecutor, proxyID int64) ([]int64, error) {
 	rows, err := exec.QueryContext(ctx, `
 		SELECT id
 		FROM accounts
 		WHERE deleted_at IS NULL
-			AND (
-				proxy_id = $1
-				OR COALESCE(extra -> 'proxy_pool_ids', '[]'::jsonb) @> jsonb_build_array($1)
-			)
+			AND COALESCE(extra -> 'proxy_pool_ids', '[]'::jsonb) @> jsonb_build_array($1::bigint)
 	`, proxyID)
 	if err != nil {
 		return nil, err
@@ -804,7 +801,7 @@ func (r *proxyRepository) sweepOneExpiredProxyOnExec(ctx context.Context, exec s
 		if err != nil {
 			return nil, err
 		}
-		referencingAccountIDs, err := accountIDsReferencingProxy(ctx, exec, proxyID)
+		referencingAccountIDs, err := accountIDsReferencingProxyPool(ctx, exec, proxyID)
 		if err != nil {
 			return nil, err
 		}
@@ -864,7 +861,7 @@ func (r *proxyRepository) sweepOneExpiredProxyOnExec(ctx context.Context, exec s
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	poolAccountIDs, err := accountIDsReferencingProxy(ctx, exec, proxyID)
+	poolAccountIDs, err := accountIDsReferencingProxyPool(ctx, exec, proxyID)
 	if err != nil {
 		return nil, err
 	}
