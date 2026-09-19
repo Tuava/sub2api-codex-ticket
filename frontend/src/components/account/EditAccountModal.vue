@@ -1649,6 +1649,15 @@
           <ProxyAdBanner />
         </div>
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
+        <div class="mt-3">
+          <label class="input-label">{{ t('admin.accounts.proxyPool') }}</label>
+          <ProxyPoolSelector
+            v-model="form.proxy_pool_ids"
+            :proxies="proxies"
+            :primary-proxy-id="form.proxy_id"
+          />
+          <p class="input-hint">{{ t('admin.accounts.proxyPoolHint') }}</p>
+        </div>
       </div>
 
       <UpstreamRequestIdHeaderField
@@ -3084,6 +3093,7 @@ import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestId
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
+import ProxyPoolSelector from '@/components/common/ProxyPoolSelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
@@ -3971,6 +3981,7 @@ const form = reactive({
   name: '',
   notes: '',
   proxy_id: null as number | null,
+  proxy_pool_ids: [] as number[],
   concurrency: 1,
   load_factor: null as number | null,
   priority: 1,
@@ -4079,6 +4090,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
+  form.proxy_pool_ids = [...(newAccount.proxy_pool_ids ?? [])]
   form.concurrency = newAccount.concurrency
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority

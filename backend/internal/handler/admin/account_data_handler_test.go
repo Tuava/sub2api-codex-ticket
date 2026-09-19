@@ -37,14 +37,15 @@ type dataProxy struct {
 }
 
 type dataAccount struct {
-	Name        string         `json:"name"`
-	Platform    string         `json:"platform"`
-	Type        string         `json:"type"`
-	Credentials map[string]any `json:"credentials"`
-	Extra       map[string]any `json:"extra"`
-	ProxyKey    *string        `json:"proxy_key"`
-	Concurrency int            `json:"concurrency"`
-	Priority    int            `json:"priority"`
+	Name          string         `json:"name"`
+	Platform      string         `json:"platform"`
+	Type          string         `json:"type"`
+	Credentials   map[string]any `json:"credentials"`
+	Extra         map[string]any `json:"extra"`
+	ProxyKey      *string        `json:"proxy_key"`
+	ProxyPoolKeys []string       `json:"proxy_pool_keys"`
+	Concurrency   int            `json:"concurrency"`
+	Priority      int            `json:"priority"`
 }
 
 func setupAccountDataRouter() (*gin.Engine, *stubAdminService) {
@@ -172,6 +173,30 @@ func TestExportDataWithoutProxies(t *testing.T) {
 	require.Len(t, resp.Data.Proxies, 0)
 	require.Len(t, resp.Data.Accounts, 1)
 	require.Nil(t, resp.Data.Accounts[0].ProxyKey)
+}
+
+func TestExportDataIncludesProxyPool(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	primaryID := int64(11)
+	poolID := int64(12)
+	adminSvc.proxies = []service.Proxy{
+		{ID: primaryID, Name: "primary", Protocol: "http", Host: "127.0.0.1", Port: 8080, Status: service.StatusActive},
+		{ID: poolID, Name: "pool", Protocol: "socks5", Host: "127.0.0.2", Port: 1080, Status: service.StatusActive},
+	}
+	adminSvc.accounts = []service.Account{{
+		ID: 21, Name: "account", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "secret"}, ProxyID: &primaryID,
+		Extra: map[string]any{service.AccountProxyPoolIDsExtraKey: []any{float64(poolID)}},
+	}}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/data", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp dataResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Proxies, 2)
+	require.Len(t, resp.Data.Accounts, 1)
+	require.Equal(t, []string{"socks5|127.0.0.2|1080||"}, resp.Data.Accounts[0].ProxyPoolKeys)
 }
 
 // TestExportDataExcludesSparkShadow 验证外审第5轮 P1/P2:导出时排除 spark 影子账号
@@ -316,6 +341,34 @@ func TestImportDataReusesProxyAndSkipsDefaultGroup(t *testing.T) {
 	require.Len(t, adminSvc.createdProxies, 0)
 	require.Len(t, adminSvc.createdAccounts, 1)
 	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
+}
+
+func TestImportDataRestoresProxyPoolKeys(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	adminSvc.proxies = []service.Proxy{
+		{ID: 1, Name: "primary", Protocol: "http", Host: "1.2.3.4", Port: 8080, Status: service.StatusActive},
+		{ID: 2, Name: "pool", Protocol: "socks5", Host: "5.6.7.8", Port: 1080, Status: service.StatusActive},
+	}
+	payload := map[string]any{"data": map[string]any{
+		"type": dataType, "version": dataVersion,
+		"proxies": []map[string]any{
+			{"proxy_key": "http|1.2.3.4|8080||", "name": "primary", "protocol": "http", "host": "1.2.3.4", "port": 8080, "status": "active"},
+			{"proxy_key": "socks5|5.6.7.8|1080||", "name": "pool", "protocol": "socks5", "host": "5.6.7.8", "port": 1080, "status": "active"},
+		},
+		"accounts": []map[string]any{{
+			"name": "acc", "platform": service.PlatformOpenAI, "type": service.AccountTypeAPIKey,
+			"credentials": map[string]any{"api_key": "x"}, "proxy_key": "http|1.2.3.4|8080||",
+			"proxy_pool_keys": []string{"socks5|5.6.7.8|1080||"}, "concurrency": 3, "priority": 50,
+		}},
+	}}
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	require.Equal(t, []int64{2}, adminSvc.createdAccounts[0].ProxyPoolIDs)
 }
 
 func TestExportDataExcludesCodexTicketMaterial(t *testing.T) {

@@ -263,15 +263,16 @@ func (h *GrokOAuthHandler) ReconcileOAuthAccounts(c *gin.Context) {
 
 func (h *GrokOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 	var req struct {
-		SessionID   string  `json:"session_id" binding:"required"`
-		Code        string  `json:"code" binding:"required"`
-		State       string  `json:"state"`
-		RedirectURI string  `json:"redirect_uri"`
-		ProxyID     *int64  `json:"proxy_id"`
-		Name        string  `json:"name"`
-		Concurrency int     `json:"concurrency"`
-		Priority    int     `json:"priority"`
-		GroupIDs    []int64 `json:"group_ids"`
+		SessionID    string  `json:"session_id" binding:"required"`
+		Code         string  `json:"code" binding:"required"`
+		State        string  `json:"state"`
+		RedirectURI  string  `json:"redirect_uri"`
+		ProxyID      *int64  `json:"proxy_id"`
+		ProxyPoolIDs []int64 `json:"proxy_pool_ids"`
+		Name         string  `json:"name"`
+		Concurrency  int     `json:"concurrency"`
+		Priority     int     `json:"priority"`
+		GroupIDs     []int64 `json:"group_ids"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -299,14 +300,15 @@ func (h *GrokOAuthHandler) CreateAccountFromOAuth(c *gin.Context) {
 	}
 
 	account, err := h.adminService.CreateAccount(c.Request.Context(), &service.CreateAccountInput{
-		Name:        name,
-		Platform:    service.PlatformGrok,
-		Type:        service.AccountTypeOAuth,
-		Credentials: credentials,
-		ProxyID:     req.ProxyID,
-		Concurrency: req.Concurrency,
-		Priority:    req.Priority,
-		GroupIDs:    req.GroupIDs,
+		Name:         name,
+		Platform:     service.PlatformGrok,
+		Type:         service.AccountTypeOAuth,
+		Credentials:  credentials,
+		ProxyID:      req.ProxyID,
+		ProxyPoolIDs: req.ProxyPoolIDs,
+		Concurrency:  req.Concurrency,
+		Priority:     req.Priority,
+		GroupIDs:     req.GroupIDs,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -322,6 +324,7 @@ type GrokSSOToOAuthRequest struct {
 	Name               string         `json:"name"`
 	Notes              *string        `json:"notes"`
 	ProxyID            *int64         `json:"proxy_id"`
+	ProxyPoolIDs       []int64        `json:"proxy_pool_ids"`
 	GroupIDs           []int64        `json:"group_ids"`
 	Credentials        map[string]any `json:"credentials"`
 	Extra              map[string]any `json:"extra"`
@@ -437,6 +440,7 @@ func (h *GrokOAuthHandler) createAccountFromSSOToken(ctx context.Context, req Gr
 		Credentials:        credentials,
 		Extra:              cloneGrokSSOMap(req.Extra),
 		ProxyID:            req.ProxyID,
+		ProxyPoolIDs:       append([]int64(nil), req.ProxyPoolIDs...),
 		Concurrency:        req.Concurrency,
 		LoadFactor:         req.LoadFactor,
 		Priority:           req.Priority,

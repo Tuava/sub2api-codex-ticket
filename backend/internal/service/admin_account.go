@@ -306,6 +306,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		Credentials:           credentials,
 		Extra:                 extra,
 		ProxyID:               cloneAccountValuePointer(proxyID),
+		ProxyPoolIDs:          AccountProxyPoolIDs(source.Extra),
 		Concurrency:           source.Concurrency,
 		Priority:              source.Priority,
 		RateMultiplier:        cloneAccountValuePointer(source.RateMultiplier),
@@ -410,6 +411,43 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
+func (s *adminServiceImpl) validateAccountProxyPool(ctx context.Context, ids []int64, primaryProxyID *int64) ([]int64, error) {
+	seen := make(map[int64]struct{}, len(ids))
+	normalized := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || (primaryProxyID != nil && id == *primaryProxyID) {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	if len(normalized) == 0 {
+		return []int64{}, nil
+	}
+	proxies, err := s.proxyRepo.ListByIDs(ctx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]Proxy, len(proxies))
+	for _, proxy := range proxies {
+		byID[proxy.ID] = proxy
+	}
+	now := time.Now()
+	for _, id := range normalized {
+		proxy, ok := byID[id]
+		if !ok {
+			return nil, infraerrors.BadRequest("ACCOUNT_PROXY_POOL_INVALID", fmt.Sprintf("proxy %d does not exist", id))
+		}
+		if !proxy.IsActive() || proxy.IsExpired(now) {
+			return nil, infraerrors.BadRequest("ACCOUNT_PROXY_POOL_UNAVAILABLE", fmt.Sprintf("proxy %d is not active", id))
+		}
+	}
+	return normalized, nil
+}
+
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
 	accountExtra = MergeOpenAICodexTicketExtra(accountExtra, nil)
 	var err error
@@ -495,6 +533,13 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	delete(accountExtra, AccountProxyPoolIDsExtraKey)
+	proxyPoolIDs, err := s.validateAccountProxyPool(ctx, input.ProxyPoolIDs, input.ProxyID)
+	if err != nil {
+		return nil, err
+	}
+	accountExtra = NormalizeAccountProxyPoolExtra(accountExtra, input.ProxyID)
+	accountExtra[AccountProxyPoolIDsExtraKey] = proxyPoolIDs
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -605,6 +650,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := ValidateUpstreamRequestIDHeaderExtra(normalizedExtra); err != nil {
 			return nil, err
 		}
+		delete(normalizedExtra, AccountProxyPoolIDsExtraKey)
 	}
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
 	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
@@ -699,6 +745,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			OllamaCloudUsageAutoRefreshExtraKey,
 			OllamaCloudUsageSnapshotExtraKey,
 			OpenAIAutoResetCreditStateExtraKey,
+			AccountProxyPoolIDsExtraKey,
 		} {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v
@@ -767,6 +814,18 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			account.ProxyID = input.ProxyID
 		}
 		account.Proxy = nil // 清除关联对象，防止 GORM Save 时根据 Proxy.ID 覆盖 ProxyID
+		account.Extra = NormalizeAccountProxyPoolExtra(account.Extra, account.ProxyID)
+	}
+	if input.ProxyPoolIDs != nil {
+		if account.IsCredentialShadow() {
+			return nil, infraerrors.BadRequest("SPARK_SHADOW_PROXY_POOL_UNSUPPORTED", "spark shadow accounts inherit the parent proxy pool")
+		}
+		proxyPoolIDs, poolErr := s.validateAccountProxyPool(ctx, *input.ProxyPoolIDs, account.ProxyID)
+		if poolErr != nil {
+			return nil, poolErr
+		}
+		account.Extra = NormalizeAccountProxyPoolExtra(account.Extra, account.ProxyID)
+		account.Extra[AccountProxyPoolIDsExtraKey] = proxyPoolIDs
 	}
 	if !reflect.DeepEqual(previousProbeIdentity, upstreamBillingProbeIdentity(account)) && account.Extra != nil {
 		delete(account.Extra, UpstreamBillingProbeExtraKey)
@@ -889,7 +948,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 
 	// 将 proxy 变更传播到 spark 影子账号（同步；Update 内部已触发调度快照）。
 	// 影子自身 proxy 不可独立编辑(见上),故对影子的更新不触发传播。
-	if input.ProxyID != nil && !account.IsCredentialShadow() {
+	if (input.ProxyID != nil || input.ProxyPoolIDs != nil) && !account.IsCredentialShadow() {
 		if err := s.propagateProxyToShadows(ctx, id, account.ProxyID); err != nil {
 			return nil, err
 		}
@@ -922,6 +981,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, OllamaCloudUsageSessionExtraKey)
 	delete(updates, OllamaCloudUsageAutoRefreshExtraKey)
 	delete(updates, OllamaCloudUsageSnapshotExtraKey)
+	delete(updates, AccountProxyPoolIDsExtraKey)
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -1097,6 +1157,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 
 	// Prepare bulk updates for columns and JSONB fields.
+	delete(input.Extra, AccountProxyPoolIDsExtraKey)
 	repoUpdates := AccountBulkUpdate{
 		Credentials:                input.Credentials,
 		Extra:                      input.Extra,
@@ -1436,6 +1497,7 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		Schedulable:     true,
 		Extra: map[string]any{
 			openAILongContextBillingEnabledKey: parent.IsOpenAILongContextBillingEnabled(),
+			AccountProxyPoolIDsExtraKey:        AccountProxyPoolIDs(parent.Extra),
 		},
 	}
 
@@ -1483,8 +1545,18 @@ func propagateAccountProxyToShadows(ctx context.Context, repo AccountRepository,
 	if err != nil {
 		return fmt.Errorf("list spark shadows for proxy propagation: %w", err)
 	}
+	if len(shadows) == 0 {
+		return nil
+	}
+	parent, err := repo.GetByID(ctx, parentID)
+	if err != nil {
+		return fmt.Errorf("load parent account proxy pool: %w", err)
+	}
+	inheritedPoolIDs := AccountProxyPoolIDs(parent.Extra)
 	for _, shadow := range shadows {
 		shadow.ProxyID = proxyID
+		shadow.Extra = NormalizeAccountProxyPoolExtra(shadow.Extra, proxyID)
+		shadow.Extra[AccountProxyPoolIDsExtraKey] = append([]int64(nil), inheritedPoolIDs...)
 		if err := repo.Update(ctx, shadow); err != nil {
 			return fmt.Errorf("update spark shadow %d proxy: %w", shadow.ID, err)
 		}

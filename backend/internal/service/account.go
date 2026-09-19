@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"log/slog"
+	"math"
 	"net/url"
 	"reflect"
 	"sort"
@@ -62,6 +63,7 @@ type Account struct {
 	QuotaDimension  string // 用量维度："" / "global" / "spark"
 
 	Proxy         *Proxy
+	ProxyPool     []*Proxy // 业务请求代理池；空时仅使用 Proxy
 	AccountGroups []AccountGroup
 	GroupIDs      []int64
 	Groups        []*Group
@@ -82,6 +84,114 @@ type Account struct {
 	headerOverrideCacheRawPtr         uintptr
 	headerOverrideCacheRawLen         int
 	headerOverrideCacheRawSig         uint64
+}
+
+const AccountProxyPoolIDsExtraKey = "proxy_pool_ids"
+
+func AccountProxyPoolIDs(extra map[string]any) []int64 {
+	if len(extra) == 0 {
+		return nil
+	}
+	raw, ok := extra[AccountProxyPoolIDsExtraKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	seen := map[int64]struct{}{}
+	ids := make([]int64, 0)
+	appendID := func(id int64) {
+		if id <= 0 {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	switch values := raw.(type) {
+	case []int64:
+		for _, id := range values {
+			appendID(id)
+		}
+	case []int:
+		for _, id := range values {
+			appendID(int64(id))
+		}
+	case []float64:
+		for _, id := range values {
+			if !math.IsNaN(id) && !math.IsInf(id, 0) && id == math.Trunc(id) && id <= math.MaxInt64 {
+				appendID(int64(id))
+			}
+		}
+	case []any:
+		for _, value := range values {
+			switch id := value.(type) {
+			case float64:
+				if !math.IsNaN(id) && !math.IsInf(id, 0) && id == math.Trunc(id) && id <= math.MaxInt64 {
+					appendID(int64(id))
+				}
+			case int:
+				appendID(int64(id))
+			case int64:
+				appendID(id)
+			case json.Number:
+				if parsed, err := id.Int64(); err == nil {
+					appendID(parsed)
+				}
+			}
+		}
+	}
+	return ids
+}
+
+func NormalizeAccountProxyPoolExtra(extra map[string]any, primaryProxyID *int64) map[string]any {
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	ids := AccountProxyPoolIDs(extra)
+	filtered := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if primaryProxyID != nil && id == *primaryProxyID {
+			continue
+		}
+		filtered = append(filtered, id)
+	}
+	extra[AccountProxyPoolIDsExtraKey] = filtered
+	return extra
+}
+
+// NextProxy returns one healthy proxy from the account's business-request
+// pool. OAuth, health checks and background jobs continue to use Proxy.
+func (a *Account) NextProxy() *Proxy {
+	if a == nil {
+		return nil
+	}
+	if len(AccountProxyPoolIDs(a.Extra)) == 0 {
+		return a.Proxy
+	}
+	return resolveAccountProxyPoolProxy(a)
+}
+
+func (a *Account) NextProxyURL() string {
+	if proxy := a.NextProxy(); proxy != nil {
+		return proxy.URL()
+	}
+	return ""
+}
+
+func (a *Account) ProxyURLByID(proxyID int64) string {
+	if a == nil || proxyID <= 0 {
+		return ""
+	}
+	if a.Proxy != nil && a.Proxy.ID == proxyID {
+		return a.Proxy.URL()
+	}
+	for _, proxy := range a.ProxyPool {
+		if proxy != nil && proxy.ID == proxyID {
+			return proxy.URL()
+		}
+	}
+	return ""
 }
 
 type OpenAIEndpointCapability string

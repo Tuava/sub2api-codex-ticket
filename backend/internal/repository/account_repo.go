@@ -315,10 +315,16 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 	}
 
 	accountIDs := make([]int64, 0, len(entAccounts))
+	proxyPoolIDs := make([]int64, 0)
 	entByID := make(map[int64]*dbent.Account, len(entAccounts))
 	for _, acc := range entAccounts {
 		entByID[acc.ID] = acc
 		accountIDs = append(accountIDs, acc.ID)
+		proxyPoolIDs = append(proxyPoolIDs, service.AccountProxyPoolIDs(acc.Extra)...)
+	}
+	proxyPoolMap, err := r.loadProxies(ctx, proxyPoolIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	groupsByAccount, groupIDsByAccount, accountGroupsByAccount, err := r.loadAccountGroups(ctx, accountIDs)
@@ -337,6 +343,8 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 		if entAcc.Edges.Proxy != nil {
 			out.Proxy = proxyEntityToService(entAcc.Edges.Proxy)
 		}
+		out.ProxyPool = proxiesForIDs(proxyPoolMap, service.AccountProxyPoolIDs(out.Extra))
+		service.RegisterAccountProxyPool(out)
 
 		if groups, ok := groupsByAccount[entAcc.ID]; ok {
 			out.Groups = groups
@@ -3240,6 +3248,7 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 		if acc.ProxyFallbackOriginID != nil {
 			proxyIDs = append(proxyIDs, *acc.ProxyFallbackOriginID)
 		}
+		proxyIDs = append(proxyIDs, service.AccountProxyPoolIDs(acc.Extra)...)
 	}
 
 	proxyMap, err := r.loadProxies(ctx, proxyIDs)
@@ -3262,6 +3271,8 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 				out.Proxy = proxy
 			}
 		}
+		out.ProxyPool = proxiesForIDs(proxyMap, service.AccountProxyPoolIDs(out.Extra))
+		service.RegisterAccountProxyPool(out)
 		out.ProxyFallbackOriginID = acc.ProxyFallbackOriginID
 		if acc.ProxyFallbackOriginID != nil {
 			if op, ok := proxyMap[*acc.ProxyFallbackOriginID]; ok && op != nil {
@@ -3323,6 +3334,19 @@ func (r *accountRepository) loadProxies(ctx context.Context, proxyIDs []int64) (
 		}
 	}
 	return proxyMap, nil
+}
+
+func proxiesForIDs(proxyMap map[int64]*service.Proxy, ids []int64) []*service.Proxy {
+	if len(ids) == 0 || len(proxyMap) == 0 {
+		return nil
+	}
+	out := make([]*service.Proxy, 0, len(ids))
+	for _, id := range ids {
+		if proxy := proxyMap[id]; proxy != nil {
+			out = append(out, proxy)
+		}
+	}
+	return out
 }
 
 func (r *accountRepository) loadAccountGroups(ctx context.Context, accountIDs []int64) (map[int64][]*service.Group, map[int64][]int64, map[int64][]service.AccountGroup, error) {

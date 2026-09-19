@@ -216,6 +216,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			CallID:                created.CallID,
 			CallHash:              hashLiveCallID(created.CallID),
 			AccountID:             account.ID,
+			ProxyID:               created.ProxyID,
 			APIKeyID:              identity.APIKeyID,
 			UserID:                identity.UserID,
 			GroupID:               liveGroupID(identity.GroupID),
@@ -304,7 +305,15 @@ func (s *OpenAIGatewayService) createUpstreamLiveCall(
 	upstreamReq.Header.Set(liveAttestationHeader, attestation)
 	applyLiveUpstreamIdentityHeaders(upstreamReq.Header)
 
-	resp, err := s.doOpenAIUpstream(upstreamReq, resolveAccountProxyURL(account), account)
+	selectedProxy := account.NextProxy()
+	selectedProxyURL := ""
+	selectedProxyID := int64(0)
+	if selectedProxy != nil {
+		selectedProxyURL = selectedProxy.URL()
+		selectedProxyID = selectedProxy.ID
+	}
+	upstreamReq = upstreamReq.WithContext(WithAccountProxyPoolResolved(upstreamReq.Context()))
+	resp, err := s.doOpenAIUpstream(upstreamReq, selectedProxyURL, account)
 	if err != nil {
 		logLiveCreateStageFailure(ctx, account.ID, "upstream_transport", err)
 		return nil, err
@@ -333,6 +342,7 @@ func (s *OpenAIGatewayService) createUpstreamLiveCall(
 		SDP:      responseBody,
 		CallID:   callID,
 		Location: resp.Header.Get("Location"),
+		ProxyID:  selectedProxyID,
 	}, nil
 }
 
@@ -451,7 +461,15 @@ func (s *OpenAIGatewayService) dialLiveSideband(ctx context.Context, record *Liv
 		return nil, err
 	}
 	target := strings.TrimRight(chatGPTLiveSidebandBaseURL, "/") + "/" + url.PathEscape(record.CallID)
-	conn, status, _, err := s.getOpenAIWSPassthroughDialer().Dial(ctx, target, headers, resolveAccountProxyURL(account))
+	proxyURL := account.ProxyURLByID(record.ProxyID)
+	if proxyURL == "" {
+		if record.ProxyID == 0 {
+			proxyURL = resolveAccountProxyURL(account)
+		} else {
+			proxyURL = account.NextProxyURL()
+		}
+	}
+	conn, status, _, err := s.getOpenAIWSPassthroughDialer().Dial(ctx, target, headers, proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("dial live sideband (status %d): %w", status, err)
 	}

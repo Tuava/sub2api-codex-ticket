@@ -3004,6 +3004,15 @@
           <ProxyAdBanner />
         </div>
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
+        <div class="mt-3">
+          <label class="input-label">{{ t('admin.accounts.proxyPool') }}</label>
+          <ProxyPoolSelector
+            v-model="form.proxy_pool_ids"
+            :proxies="proxies"
+            :primary-proxy-id="form.proxy_id"
+          />
+          <p class="input-hint">{{ t('admin.accounts.proxyPoolHint') }}</p>
+        </div>
       </div>
 
       <UpstreamRequestIdHeaderField
@@ -3930,6 +3939,7 @@ import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestId
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
+import ProxyPoolSelector from '@/components/common/ProxyPoolSelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
@@ -4723,6 +4733,7 @@ const form = reactive({
   type: 'oauth' as AccountType, // Will be 'oauth', 'setup-token', or 'apikey'
   credentials: {} as Record<string, unknown>,
   proxy_id: null as number | null,
+  proxy_pool_ids: [] as number[],
   concurrency: 10,
   load_factor: null as number | null,
   priority: 1,
@@ -5207,6 +5218,11 @@ const withAntigravityConfirmFlag = (payload: CreateAccountRequest): CreateAccoun
   return cloned
 }
 
+const createAccountWithProxyPool = (payload: CreateAccountRequest) => adminAPI.accounts.create({
+  ...payload,
+  proxy_pool_ids: [...form.proxy_pool_ids]
+})
+
 const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<void>): Promise<boolean> => {
   if (!needsMixedChannelCheck(form.platform)) {
     return true
@@ -5240,7 +5256,7 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
 const submitCreateAccount = async (payload: CreateAccountRequest) => {
   submitting.value = true
   try {
-    const account = await adminAPI.accounts.create(withAntigravityConfirmFlag(payload))
+    const account = await createAccountWithProxyPool(withAntigravityConfirmFlag(payload))
     const modelMapping = payload.credentials.model_mapping
     const hasConcreteMappedTarget = payload.type === 'apikey' &&
       typeof modelMapping === 'object' &&
@@ -5300,6 +5316,7 @@ const resetForm = () => {
   form.type = 'oauth'
   form.credentials = {}
   form.proxy_id = null
+  form.proxy_pool_ids = []
   form.concurrency = 10
   form.load_factor = null
   form.priority = 1
@@ -6054,7 +6071,7 @@ const handleGrokValidateRT = async (refreshTokenInput: string) => {
           return
         }
 
-        await adminAPI.accounts.create({
+        await createAccountWithProxyPool({
           name: accountName,
           notes: form.notes,
           platform: 'grok',
@@ -6128,6 +6145,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
       name: form.name || undefined,
       notes: form.notes || undefined,
       proxy_id: form.proxy_id,
+      proxy_pool_ids: [...form.proxy_pool_ids],
       group_ids: form.group_ids,
       credentials,
       concurrency: form.concurrency,
@@ -6231,7 +6249,7 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
           return
         }
 
-        await adminAPI.accounts.create({
+        await createAccountWithProxyPool({
           name: accountName,
           notes: form.notes,
           platform: 'grok',
@@ -6330,7 +6348,7 @@ const handleOpenAIExchange = async (authCode: string) => {
     }
 
     if (shouldCreateOpenAI) {
-      await adminAPI.accounts.create({
+      await createAccountWithProxyPool({
         name: form.name,
         notes: form.notes,
         platform: 'openai',
@@ -6443,6 +6461,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
       name: form.name,
       notes: form.notes || null,
       proxy_id: form.proxy_id,
+      proxy_pool_ids: [...form.proxy_pool_ids],
       concurrency: form.concurrency,
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
@@ -6521,6 +6540,7 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
       name: form.name,
       notes: form.notes || null,
       proxy_id: form.proxy_id,
+      proxy_pool_ids: [...form.proxy_pool_ids],
       concurrency: form.concurrency,
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
@@ -6611,7 +6631,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
         const accountName = refreshTokens.length > 1 ? `${baseName} #${i + 1}` : baseName
 
         if (shouldCreateOpenAI) {
-          await adminAPI.accounts.create({
+          await createAccountWithProxyPool({
             name: accountName,
             notes: form.notes,
             platform: 'openai',
@@ -6726,7 +6746,7 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
         })
-        await adminAPI.accounts.create(createPayload)
+        await createAccountWithProxyPool(createPayload)
         successCount++
       } catch (error: any) {
         failedCount++
@@ -7091,7 +7111,7 @@ const handleCookieAuth = async (sessionKey: string) => {
           credentials.temp_unschedulable_rules = tempUnschedPayload
         }
 
-        await adminAPI.accounts.create({
+        await createAccountWithProxyPool({
           name: accountName,
           notes: form.notes,
           platform: form.platform,

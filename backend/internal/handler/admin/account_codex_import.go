@@ -28,6 +28,7 @@ type CodexSessionImportRequest struct {
 	Notes                   *string        `json:"notes"`
 	GroupIDs                []int64        `json:"group_ids"`
 	ProxyID                 *int64         `json:"proxy_id"`
+	ProxyPoolIDs            *[]int64       `json:"proxy_pool_ids"`
 	Concurrency             *int           `json:"concurrency"`
 	Priority                *int           `json:"priority"`
 	RateMultiplier          *float64       `json:"rate_multiplier"`
@@ -289,6 +290,10 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			if req.ProxyID != nil {
 				updateInput.ProxyID = req.ProxyID
 			}
+			if req.ProxyPoolIDs != nil {
+				poolIDs := append([]int64(nil), (*req.ProxyPoolIDs)...)
+				updateInput.ProxyPoolIDs = &poolIDs
+			}
 			if len(req.GroupIDs) > 0 {
 				groupIDs := append([]int64(nil), req.GroupIDs...)
 				updateInput.GroupIDs = &groupIDs
@@ -328,6 +333,10 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			continue
 		}
 
+		proxyPoolIDs := []int64(nil)
+		if req.ProxyPoolIDs != nil {
+			proxyPoolIDs = append(proxyPoolIDs, (*req.ProxyPoolIDs)...)
+		}
 		account, createErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
 			Name:                  accountName,
 			Notes:                 req.Notes,
@@ -336,6 +345,7 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 			Credentials:           credentials,
 			Extra:                 extra,
 			ProxyID:               req.ProxyID,
+			ProxyPoolIDs:          proxyPoolIDs,
 			Concurrency:           concurrency,
 			Priority:              priority,
 			RateMultiplier:        req.RateMultiplier,

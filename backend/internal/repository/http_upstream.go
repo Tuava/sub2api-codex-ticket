@@ -207,6 +207,9 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	if req != nil {
 		profile = service.HTTPUpstreamProfileFromContext(req.Context())
 	}
+	if req != nil && service.AccountProxyPoolEligible(req.Context()) && !service.AccountProxyPoolResolved(req.Context()) {
+		proxyURL = service.ResolveAccountProxyPoolURL(accountID, proxyURL)
+	}
 
 	// 获取或创建对应的客户端，并标记请求占用
 	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
@@ -257,6 +260,9 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	upstreamProfile := service.HTTPUpstreamProfileDefault
 	if req != nil {
 		upstreamProfile = service.HTTPUpstreamProfileFromContext(req.Context())
+	}
+	if req != nil && service.AccountProxyPoolEligible(req.Context()) && !service.AccountProxyPoolResolved(req.Context()) {
+		proxyURL = service.ResolveAccountProxyPoolURL(accountID, proxyURL)
 	}
 
 	targetHost := ""

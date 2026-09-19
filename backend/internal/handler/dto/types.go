@@ -218,6 +218,7 @@ type Account struct {
 	OllamaCloudUsage        *service.OllamaCloudUsageState    `json:"ollama_cloud_usage,omitempty"`
 	CodexTurnTickets        []service.OpenAICodexTicketStatus `json:"codex_turn_tickets,omitempty"`
 	ProxyID                 *int64                            `json:"proxy_id"`
+	ProxyPoolIDs            []int64                           `json:"proxy_pool_ids"`
 	ProxyFallbackOriginID   *int64                            `json:"proxy_fallback_origin_id"`
 	ProxyFallbackOriginName *string                           `json:"proxy_fallback_origin_name,omitempty"`
 	Concurrency             int                               `json:"concurrency"`
@@ -344,6 +345,7 @@ type AccountListItem struct {
 	CodexTurnTickets  []service.OpenAICodexTicketStatus `json:"codex_turn_tickets,omitempty"`
 
 	ProxyID                 *int64     `json:"proxy_id"`
+	ProxyPoolIDs            []int64    `json:"proxy_pool_ids"`
 	ProxyFallbackOriginID   *int64     `json:"proxy_fallback_origin_id"`
 	ProxyFallbackOriginName *string    `json:"proxy_fallback_origin_name,omitempty"`
 	Concurrency             int        `json:"concurrency"`

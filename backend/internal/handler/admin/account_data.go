@@ -65,6 +65,7 @@ type DataAccount struct {
 	Credentials        map[string]any `json:"credentials"`
 	Extra              map[string]any `json:"extra,omitempty"`
 	ProxyKey           *string        `json:"proxy_key,omitempty"`
+	ProxyPoolKeys      []string       `json:"proxy_pool_keys,omitempty"`
 	Concurrency        int            `json:"concurrency"`
 	Priority           int            `json:"priority"`
 	RateMultiplier     *float64       `json:"rate_multiplier,omitempty"`
@@ -194,19 +195,28 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 				proxyKey = &key
 			}
 		}
+		proxyPoolKeys := make([]string, 0)
+		for _, proxyID := range service.AccountProxyPoolIDs(acc.Extra) {
+			if key, ok := proxyKeyByID[proxyID]; ok {
+				proxyPoolKeys = append(proxyPoolKeys, key)
+			}
+		}
 		var expiresAt *int64
 		if acc.ExpiresAt != nil {
 			v := acc.ExpiresAt.Unix()
 			expiresAt = &v
 		}
+		exportExtra := service.RedactOpenAICodexTicketExtra(acc.Extra)
+		delete(exportExtra, service.AccountProxyPoolIDsExtraKey)
 		dataAccounts = append(dataAccounts, DataAccount{
 			Name:               acc.Name,
 			Notes:              acc.Notes,
 			Platform:           acc.Platform,
 			Type:               acc.Type,
 			Credentials:        acc.Credentials,
-			Extra:              service.RedactOpenAICodexTicketExtra(acc.Extra),
+			Extra:              exportExtra,
 			ProxyKey:           proxyKey,
+			ProxyPoolKeys:      proxyPoolKeys,
 			Concurrency:        acc.Concurrency,
 			Priority:           acc.Priority,
 			RateMultiplier:     acc.RateMultiplier,
@@ -430,6 +440,22 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 				continue
 			}
 		}
+		proxyPoolIDs := make([]int64, 0, len(item.ProxyPoolKeys))
+		for _, key := range item.ProxyPoolKeys {
+			id, ok := proxyKeyToID[key]
+			if !ok {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: item.Name, ProxyKey: key, Message: "proxy_pool_key not found",
+				})
+				proxyPoolIDs = nil
+				break
+			}
+			proxyPoolIDs = append(proxyPoolIDs, id)
+		}
+		if len(item.ProxyPoolKeys) > 0 && proxyPoolIDs == nil {
+			continue
+		}
 
 		enrichCredentialsFromIDToken(&item)
 
@@ -441,6 +467,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			Credentials:          item.Credentials,
 			Extra:                item.Extra,
 			ProxyID:              proxyID,
+			ProxyPoolIDs:         proxyPoolIDs,
 			Concurrency:          item.Concurrency,
 			Priority:             item.Priority,
 			RateMultiplier:       item.RateMultiplier,
@@ -575,18 +602,20 @@ func (h *AccountHandler) resolveExportProxies(ctx context.Context, accounts []se
 	seen := make(map[int64]struct{})
 	ids := make([]int64, 0)
 	for i := range accounts {
-		if accounts[i].ProxyID == nil {
-			continue
+		accountProxyIDs := service.AccountProxyPoolIDs(accounts[i].Extra)
+		if accounts[i].ProxyID != nil {
+			accountProxyIDs = append([]int64{*accounts[i].ProxyID}, accountProxyIDs...)
 		}
-		id := *accounts[i].ProxyID
-		if id <= 0 {
-			continue
+		for _, id := range accountProxyIDs {
+			if id <= 0 {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
 		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
 		return []service.Proxy{}, nil
