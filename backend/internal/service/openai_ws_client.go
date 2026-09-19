@@ -85,6 +85,61 @@ type coderOpenAIWSClientDialer struct {
 	proxyMisses  atomic.Int64
 }
 
+type proxyLaneOpenAIWSClientConn struct {
+	openAIWSClientConn
+	release func(bool)
+	cancel  context.CancelFunc
+	once    sync.Once
+	timer   *time.Timer
+}
+
+func (c *proxyLaneOpenAIWSClientConn) Close() error {
+	if c.timer != nil {
+		c.timer.Stop()
+	}
+	err := c.openAIWSClientConn.Close()
+	c.once.Do(func() {
+		c.release(err == nil)
+		c.cancel()
+	})
+	return err
+}
+
+func (c *proxyLaneOpenAIWSClientConn) CloseNow() error {
+	if c.timer != nil {
+		c.timer.Stop()
+	}
+	var err error
+	if closer, ok := c.openAIWSClientConn.(openAIWSForceCloser); ok {
+		err = closer.CloseNow()
+	} else {
+		err = c.openAIWSClientConn.Close()
+	}
+	c.once.Do(func() {
+		c.release(false)
+		c.cancel()
+	})
+	return err
+}
+
+func (c *proxyLaneOpenAIWSClientConn) SupportsIdlePingWithoutReader() bool {
+	capable, ok := c.openAIWSClientConn.(openAIWSIdlePingCapable)
+	return ok && capable.SupportsIdlePingWithoutReader()
+}
+
+func (c *proxyLaneOpenAIWSClientConn) RequiresReaderLoop() bool {
+	capable, ok := c.openAIWSClientConn.(openAIWSReaderLoopCapable)
+	return ok && capable.RequiresReaderLoop()
+}
+
+func (c *proxyLaneOpenAIWSClientConn) UpstreamPingCount() int64 {
+	counter, ok := c.openAIWSClientConn.(openAIWSUpstreamPingCounter)
+	if !ok {
+		return 0
+	}
+	return counter.UpstreamPingCount()
+}
+
 // openAIWSHandshakeError keeps a bounded, non-logged HTTP error body so the
 // Agent Identity recovery path can distinguish an invalid task from other
 // 401 handshake failures.
@@ -123,6 +178,23 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		return nil, 0, nil, errors.New("ws url is empty")
 	}
 
+	plainProxyURL, laneAccountID, _, laneMarked := splitAccountProxyLaneURL(proxyURL)
+	laneRelease := func(bool) {}
+	laneCancel := func() {}
+	laneTimeout := 0
+	if laneMarked {
+		var laneErr error
+		plainProxyURL, _, _, laneTimeout, laneRelease, laneErr = AcquireAccountProxyLaneForURL(laneAccountID, proxyURL)
+		if laneErr != nil {
+			return nil, 0, nil, laneErr
+		}
+		if laneTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(laneTimeout)*time.Second)
+			laneCancel = cancel
+		}
+	}
+
 	wrapped := &coderOpenAIWSClientConn{}
 	opts := &coderws.DialOptions{
 		HTTPHeader:      cloneHeader(headers),
@@ -132,9 +204,11 @@ func (d *coderOpenAIWSClientDialer) Dial(
 			return true
 		},
 	}
-	if proxy := strings.TrimSpace(proxyURL); proxy != "" {
+	if proxy := strings.TrimSpace(plainProxyURL); proxy != "" {
 		proxyClient, err := d.proxyHTTPClient(proxy)
 		if err != nil {
+			laneRelease(false)
+			laneCancel()
 			return nil, 0, nil, err
 		}
 		opts.HTTPClient = proxyClient
@@ -142,6 +216,8 @@ func (d *coderOpenAIWSClientDialer) Dial(
 
 	conn, resp, err := coderws.Dial(ctx, targetURL, opts)
 	if err != nil {
+		laneRelease(false)
+		laneCancel()
 		status := 0
 		respHeaders := http.Header(nil)
 		if resp != nil {
@@ -163,6 +239,19 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		respHeaders = cloneHeader(resp.Header)
 	}
 	wrapped.conn = conn
+	if laneMarked {
+		tracked := &proxyLaneOpenAIWSClientConn{
+			openAIWSClientConn: wrapped,
+			release:            laneRelease,
+			cancel:             laneCancel,
+		}
+		if laneTimeout > 0 {
+			tracked.timer = time.AfterFunc(time.Duration(laneTimeout)*time.Second, func() {
+				_ = tracked.CloseNow()
+			})
+		}
+		return tracked, 0, respHeaders, nil
+	}
 	return wrapped, 0, respHeaders, nil
 }
 

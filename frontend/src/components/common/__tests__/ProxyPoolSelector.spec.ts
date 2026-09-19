@@ -35,10 +35,11 @@ describe('ProxyPoolSelector', () => {
     })
 
     await wrapper.get('button.select-trigger').trigger('click')
-    expect(wrapper.text()).not.toContain('proxy-1')
-    expect(wrapper.text()).toContain('proxy-2')
-    expect(wrapper.text()).not.toContain('proxy-3')
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    const options = wrapper.find('div.max-h-64')
+    expect(options.text()).not.toContain('proxy-1')
+    expect(options.text()).toContain('proxy-2')
+    expect(options.text()).not.toContain('proxy-3')
+    await options.get('input[type="checkbox"]').setValue(true)
     expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual([2])
   })
 

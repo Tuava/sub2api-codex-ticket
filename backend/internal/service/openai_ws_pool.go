@@ -91,18 +91,23 @@ type openAIWSHandshakeCompatibilityKey struct {
 	threadID            string
 	clientRequestID     string
 	codexWindowID       string
+	proxyURL            string
 }
 
 type openAIWSConnLease struct {
-	pool       *openAIWSConnPool
-	accountID  int64
-	conn       *openAIWSConn
-	queueWait  time.Duration
-	connPick   time.Duration
-	idleBefore time.Duration
-	ageBefore  time.Duration
-	reused     bool
-	released   atomic.Bool
+	pool        *openAIWSConnPool
+	accountID   int64
+	conn        *openAIWSConn
+	queueWait   time.Duration
+	connPick    time.Duration
+	idleBefore  time.Duration
+	ageBefore   time.Duration
+	reused      bool
+	released    atomic.Bool
+	laneRelease func(bool)
+	laneCancel  context.CancelFunc
+	laneSuccess atomic.Bool
+	laneTimer   *time.Timer
 }
 
 func (l *openAIWSConnLease) activeConn() (*openAIWSConn, error) {
@@ -263,6 +268,7 @@ func (l *openAIWSConnLease) MarkBroken() {
 		return
 	}
 	l.pool.evictConn(l.accountID, l.conn.id)
+	l.laneSuccess.Store(false)
 }
 
 func (l *openAIWSConnLease) Release() {
@@ -273,6 +279,15 @@ func (l *openAIWSConnLease) Release() {
 		return
 	}
 	l.conn.release()
+	if l.laneRelease != nil {
+		l.laneRelease(l.laneSuccess.Load())
+	}
+	if l.laneCancel != nil {
+		l.laneCancel()
+	}
+	if l.laneTimer != nil {
+		l.laneTimer.Stop()
+	}
 	if l.pool != nil {
 		l.pool.notifyAccountPoolChanged(l.accountID)
 	}
@@ -1111,7 +1126,38 @@ func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireReque
 		p.metrics.acquireTotal.Add(1)
 	}
 	queueWait := &openAIWSAcquireQueueWait{}
+	laneRelease := func(bool) {}
+	laneCancel := func() {}
+	laneTimeout := 0
+	if _, _, _, marked := splitAccountProxyLaneURL(req.ProxyURL); marked {
+		plainProxyURL, _, _, timeoutSeconds, release, laneErr := AcquireAccountProxyLaneForURL(req.Account.ID, req.ProxyURL)
+		if laneErr != nil {
+			return nil, laneErr
+		}
+		req.ProxyURL = plainProxyURL
+		laneRelease = release
+		laneTimeout = timeoutSeconds
+		if timeoutSeconds > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+			laneCancel = cancel
+		}
+	}
 	lease, err := p.acquire(ctx, cloneOpenAIWSAcquireRequest(req), 0, queueWait)
+	if lease == nil {
+		laneRelease(false)
+		laneCancel()
+		return nil, err
+	}
+	lease.laneRelease = laneRelease
+	lease.laneCancel = laneCancel
+	lease.laneSuccess.Store(true)
+	if laneTimeout > 0 {
+		lease.laneTimer = time.AfterFunc(time.Duration(laneTimeout)*time.Second, func() {
+			lease.MarkBroken()
+			lease.Release()
+		})
+	}
 	if lease != nil && queueWait.rewoken {
 		// 广播重选经 tryAcquire 拿令牌，不像排队分支那样在取得令牌后检查取消，
 		// 这里补上复查：上下文已取消就归还令牌并按取消返回。
@@ -1146,6 +1192,7 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 retryAcquire:
 	accountID := req.Account.ID
 	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	compatibility.proxyURL = stringsTrim(req.ProxyURL)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -2153,6 +2200,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
 	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	pooledConn.handshakeCompatibility.proxyURL = stringsTrim(req.ProxyURL)
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -2221,13 +2269,13 @@ func (p *openAIWSConnPool) effectiveMaxConnsByAccount(account *Account) int {
 	if hardCap <= 0 {
 		return 0
 	}
-	if p.modeRouterV2Enabled() && account != nil && account.Concurrency <= 0 {
+	if p.modeRouterV2Enabled() && account != nil && account.EffectiveConcurrency() <= 0 {
 		return 0
 	}
 	if account == nil || !p.dynamicMaxConnsEnabled() {
 		return hardCap
 	}
-	if account.Concurrency <= 0 {
+	if account.EffectiveConcurrency() <= 0 {
 		// 0/-1 等“无限制”并发场景下，仍由全局硬上限兜底。
 		return hardCap
 	}
@@ -2235,7 +2283,7 @@ func (p *openAIWSConnPool) effectiveMaxConnsByAccount(account *Account) int {
 	if factor <= 0 {
 		factor = 1.0
 	}
-	effective := int(math.Ceil(float64(account.Concurrency) * factor))
+	effective := int(math.Ceil(float64(account.EffectiveConcurrency()) * factor))
 	if effective < 1 {
 		effective = 1
 	}

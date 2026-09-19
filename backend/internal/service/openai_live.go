@@ -305,12 +305,10 @@ func (s *OpenAIGatewayService) createUpstreamLiveCall(
 	upstreamReq.Header.Set(liveAttestationHeader, attestation)
 	applyLiveUpstreamIdentityHeaders(upstreamReq.Header)
 
-	selectedProxy := account.NextProxy()
-	selectedProxyURL := ""
+	selectedProxyURL := account.NextProxyLaneURL()
 	selectedProxyID := int64(0)
-	if selectedProxy != nil {
-		selectedProxyURL = selectedProxy.URL()
-		selectedProxyID = selectedProxy.ID
+	if _, _, proxyID, marked := splitAccountProxyLaneURL(selectedProxyURL); marked {
+		selectedProxyID = proxyID
 	}
 	upstreamReq = upstreamReq.WithContext(WithAccountProxyPoolResolved(upstreamReq.Context()))
 	resp, err := s.doOpenAIUpstream(upstreamReq, selectedProxyURL, account)
@@ -462,11 +460,14 @@ func (s *OpenAIGatewayService) dialLiveSideband(ctx context.Context, record *Liv
 	}
 	target := strings.TrimRight(chatGPTLiveSidebandBaseURL, "/") + "/" + url.PathEscape(record.CallID)
 	proxyURL := account.ProxyURLByID(record.ProxyID)
+	if proxyURL != "" && record.ProxyID > 0 {
+		proxyURL = markAccountProxyLaneURL(proxyURL, account.ID, record.ProxyID)
+	}
 	if proxyURL == "" {
 		if record.ProxyID == 0 {
 			proxyURL = resolveAccountProxyURL(account)
 		} else {
-			proxyURL = account.NextProxyURL()
+			proxyURL = account.NextProxyLaneURL()
 		}
 	}
 	conn, status, _, err := s.getOpenAIWSPassthroughDialer().Dial(ctx, target, headers, proxyURL)

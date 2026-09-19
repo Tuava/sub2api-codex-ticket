@@ -344,6 +344,7 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 			out.Proxy = proxyEntityToService(entAcc.Edges.Proxy)
 		}
 		out.ProxyPool = proxiesForIDs(proxyPoolMap, service.AccountProxyPoolIDs(out.Extra))
+		out.ProxyPoolHydrated = true
 		service.RegisterAccountProxyPool(out)
 
 		if groups, ok := groupsByAccount[entAcc.ID]; ok {
@@ -3272,6 +3273,7 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 			}
 		}
 		out.ProxyPool = proxiesForIDs(proxyMap, service.AccountProxyPoolIDs(out.Extra))
+		out.ProxyPoolHydrated = true
 		service.RegisterAccountProxyPool(out)
 		out.ProxyFallbackOriginID = acc.ProxyFallbackOriginID
 		if acc.ProxyFallbackOriginID != nil {

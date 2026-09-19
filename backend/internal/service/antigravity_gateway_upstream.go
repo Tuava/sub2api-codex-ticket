@@ -73,7 +73,7 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	}
 
 	// 代理 URL
-	proxyURL := account.NextProxyURL()
+	proxyURL := account.NextProxyLaneURL()
 
 	// 发送请求
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)

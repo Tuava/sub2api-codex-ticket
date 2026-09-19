@@ -30,7 +30,8 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState
+  GrokMediaEligibilityState,
+  ProxyLaneStatus
 } from '@/types'
 
 /**
@@ -175,6 +176,19 @@ export async function listWithEtag(
 export async function getById(id: number): Promise<Account> {
   const { data } = await apiClient.get<Account>(`/admin/accounts/${id}`)
   return data
+}
+
+export interface ProxyLaneRuntimeItem {
+  effective_concurrency: number
+  lanes: ProxyLaneStatus[]
+}
+
+export async function getProxyLaneRuntime(accountIds: number[]): Promise<Record<string, ProxyLaneRuntimeItem>> {
+  const { data } = await apiClient.post<{ items: Record<string, ProxyLaneRuntimeItem> }>(
+    '/admin/accounts/proxy-lanes/runtime',
+    { account_ids: accountIds }
+  )
+  return data.items || {}
 }
 
 /**
@@ -1100,6 +1114,7 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
 export const accountsAPI = {
   list,
   listWithEtag,
+  getProxyLaneRuntime,
   getUpstreamBillingRatesWithEtag,
   getById,
   create,

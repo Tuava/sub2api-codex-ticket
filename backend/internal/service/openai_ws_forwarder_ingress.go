@@ -796,7 +796,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},
 		ProxyURL: func() string {
-			return account.NextProxyURL()
+			return account.NextProxyLaneURL()
 		}(),
 		ForceNewConn: false,
 	}

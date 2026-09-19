@@ -210,10 +210,25 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	if req != nil && service.AccountProxyPoolEligible(req.Context()) && !service.AccountProxyPoolResolved(req.Context()) {
 		proxyURL = service.ResolveAccountProxyPoolURL(accountID, proxyURL)
 	}
+	proxyURL, _, laneConcurrency, laneTimeout, releaseLane, laneErr := service.AcquireAccountProxyLaneForURL(accountID, proxyURL)
+	if laneErr != nil {
+		return nil, laneErr
+	}
+	if laneConcurrency > 0 {
+		accountConcurrency = laneConcurrency
+	}
+	cancelLaneTimeout := func() {}
+	if req != nil && laneTimeout > 0 {
+		laneCtx, cancel := context.WithTimeout(req.Context(), time.Duration(laneTimeout)*time.Second)
+		req = req.Clone(laneCtx)
+		cancelLaneTimeout = cancel
+	}
 
 	// 获取或创建对应的客户端，并标记请求占用
 	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
 	if err != nil {
+		releaseLane(false)
+		cancelLaneTimeout()
 		return nil, err
 	}
 
@@ -226,6 +241,8 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 		// 请求失败，立即减少计数
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(false)
+		cancelLaneTimeout()
 		return nil, err
 	}
 	s.recordOpenAIHTTP2Success(profile, entry.protocolMode, entry.proxyKey)
@@ -238,6 +255,8 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	resp.Body = wrapTrackedBody(resp.Body, func() {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusTooManyRequests)
+		cancelLaneTimeout()
 	})
 
 	return resp, nil
@@ -264,6 +283,19 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	if req != nil && service.AccountProxyPoolEligible(req.Context()) && !service.AccountProxyPoolResolved(req.Context()) {
 		proxyURL = service.ResolveAccountProxyPoolURL(accountID, proxyURL)
 	}
+	proxyURL, _, laneConcurrency, laneTimeout, releaseLane, laneErr := service.AcquireAccountProxyLaneForURL(accountID, proxyURL)
+	if laneErr != nil {
+		return nil, laneErr
+	}
+	if laneConcurrency > 0 {
+		accountConcurrency = laneConcurrency
+	}
+	cancelLaneTimeout := func() {}
+	if req != nil && laneTimeout > 0 {
+		laneCtx, cancel := context.WithTimeout(req.Context(), time.Duration(laneTimeout)*time.Second)
+		req = req.Clone(laneCtx)
+		cancelLaneTimeout = cancel
+	}
 
 	targetHost := ""
 	if req != nil && req.URL != nil {
@@ -276,11 +308,15 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	slog.Debug("tls_fingerprint_enabled", "account_id", accountID, "target", targetHost, "proxy", proxyInfo, "profile", profile.Name)
 
 	if err := s.validateRequestHost(req); err != nil {
+		releaseLane(false)
+		cancelLaneTimeout()
 		return nil, err
 	}
 
 	entry, err := s.acquireClientWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile)
 	if err != nil {
+		releaseLane(false)
+		cancelLaneTimeout()
 		slog.Debug("tls_fingerprint_acquire_client_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
@@ -291,6 +327,8 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(false)
+		cancelLaneTimeout()
 		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
@@ -300,6 +338,8 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	resp.Body = wrapTrackedBody(resp.Body, func() {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		releaseLane(resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusTooManyRequests)
+		cancelLaneTimeout()
 	})
 
 	return resp, nil

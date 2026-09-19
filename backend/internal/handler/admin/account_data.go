@@ -50,6 +50,17 @@ type DataProxy struct {
 	ExpiryWarnDays  int    `json:"expiry_warn_days,omitempty"`
 }
 
+type DataProxyLaneConfig struct {
+	ProxyKey               string `json:"proxy_key"`
+	Enabled                bool   `json:"enabled"`
+	MaxConcurrency         int    `json:"max_concurrency"`
+	Weight                 int    `json:"weight"`
+	TimeoutSeconds         int    `json:"timeout_seconds"`
+	ErrorCircuitThreshold  int    `json:"error_circuit_threshold"`
+	CircuitCooldownSeconds int    `json:"circuit_cooldown_seconds"`
+	FallbackOrder          int    `json:"fallback_order"`
+}
+
 // DataAccount 是管理员显式备份导出使用的账号结构，故意不走 dto.Account 的脱敏路径，
 // Credentials 原文返回。这是"管理员备份"这一显式行为的一部分；如未来需要导出脱敏版本，
 // 应新增独立结构而非修改这里。
@@ -58,19 +69,21 @@ type DataProxy struct {
 // 影子的独立调度配置(priority/并发/分组/status 管理员可单独调)亦不在本备份范围,属已知局限
 // (外审第6轮裁决:保持排除 + 前端警告,而非升级格式做完整往返)。
 type DataAccount struct {
-	Name               string         `json:"name"`
-	Notes              *string        `json:"notes,omitempty"`
-	Platform           string         `json:"platform"`
-	Type               string         `json:"type"`
-	Credentials        map[string]any `json:"credentials"`
-	Extra              map[string]any `json:"extra,omitempty"`
-	ProxyKey           *string        `json:"proxy_key,omitempty"`
-	ProxyPoolKeys      []string       `json:"proxy_pool_keys,omitempty"`
-	Concurrency        int            `json:"concurrency"`
-	Priority           int            `json:"priority"`
-	RateMultiplier     *float64       `json:"rate_multiplier,omitempty"`
-	ExpiresAt          *int64         `json:"expires_at,omitempty"`
-	AutoPauseOnExpired *bool          `json:"auto_pause_on_expired,omitempty"`
+	Name               string                `json:"name"`
+	Notes              *string               `json:"notes,omitempty"`
+	Platform           string                `json:"platform"`
+	Type               string                `json:"type"`
+	Credentials        map[string]any        `json:"credentials"`
+	Extra              map[string]any        `json:"extra,omitempty"`
+	ProxyKey           *string               `json:"proxy_key,omitempty"`
+	ProxyPoolKeys      []string              `json:"proxy_pool_keys,omitempty"`
+	ProxyLaneConfigs   []DataProxyLaneConfig `json:"proxy_lane_configs,omitempty"`
+	ProxyLaneStrategy  string                `json:"proxy_lane_strategy,omitempty"`
+	Concurrency        int                   `json:"concurrency"`
+	Priority           int                   `json:"priority"`
+	RateMultiplier     *float64              `json:"rate_multiplier,omitempty"`
+	ExpiresAt          *int64                `json:"expires_at,omitempty"`
+	AutoPauseOnExpired *bool                 `json:"auto_pause_on_expired,omitempty"`
 }
 
 type DataImportRequest struct {
@@ -207,6 +220,20 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 				proxyPoolKeys = append(proxyPoolKeys, key)
 			}
 		}
+		proxyLaneConfigs := make([]DataProxyLaneConfig, 0)
+		for _, lane := range acc.ProxyLaneConfigs() {
+			key, ok := proxyKeyByID[lane.ProxyID]
+			if !ok {
+				continue
+			}
+			proxyLaneConfigs = append(proxyLaneConfigs, DataProxyLaneConfig{
+				ProxyKey: key, Enabled: lane.Enabled, MaxConcurrency: lane.MaxConcurrency,
+				Weight: lane.Weight, TimeoutSeconds: lane.TimeoutSeconds,
+				ErrorCircuitThreshold:  lane.ErrorCircuitThreshold,
+				CircuitCooldownSeconds: lane.CircuitCooldownSeconds,
+				FallbackOrder:          lane.FallbackOrder,
+			})
+		}
 		var expiresAt *int64
 		if acc.ExpiresAt != nil {
 			v := acc.ExpiresAt.Unix()
@@ -214,6 +241,8 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 		}
 		exportExtra := service.RedactOpenAICodexTicketExtra(acc.Extra)
 		delete(exportExtra, service.AccountProxyPoolIDsExtraKey)
+		delete(exportExtra, service.AccountProxyLaneConfigsExtraKey)
+		delete(exportExtra, service.AccountProxyLaneStrategyExtraKey)
 		dataAccounts = append(dataAccounts, DataAccount{
 			Name:               acc.Name,
 			Notes:              acc.Notes,
@@ -223,6 +252,8 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 			Extra:              exportExtra,
 			ProxyKey:           proxyKey,
 			ProxyPoolKeys:      proxyPoolKeys,
+			ProxyLaneConfigs:   proxyLaneConfigs,
+			ProxyLaneStrategy:  service.ProxyLaneStrategy(acc.Extra),
 			Concurrency:        acc.Concurrency,
 			Priority:           acc.Priority,
 			RateMultiplier:     acc.RateMultiplier,
@@ -463,6 +494,29 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		if len(item.ProxyPoolKeys) > 0 && proxyPoolIDs == nil {
 			continue
 		}
+		proxyLaneConfigs := make([]service.ProxyLaneConfig, 0, len(item.ProxyLaneConfigs))
+		laneConfigInvalid := false
+		for _, lane := range item.ProxyLaneConfigs {
+			proxyID, ok := proxyKeyToID[lane.ProxyKey]
+			if !ok {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: item.Name, ProxyKey: lane.ProxyKey, Message: "proxy lane key not found",
+				})
+				laneConfigInvalid = true
+				break
+			}
+			proxyLaneConfigs = append(proxyLaneConfigs, service.ProxyLaneConfig{
+				ProxyID: proxyID, Enabled: lane.Enabled, MaxConcurrency: lane.MaxConcurrency,
+				Weight: lane.Weight, TimeoutSeconds: lane.TimeoutSeconds,
+				ErrorCircuitThreshold:  lane.ErrorCircuitThreshold,
+				CircuitCooldownSeconds: lane.CircuitCooldownSeconds,
+				FallbackOrder:          lane.FallbackOrder,
+			})
+		}
+		if laneConfigInvalid {
+			continue
+		}
 
 		enrichCredentialsFromIDToken(&item)
 
@@ -475,6 +529,8 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			Extra:                item.Extra,
 			ProxyID:              proxyID,
 			ProxyPoolIDs:         proxyPoolIDs,
+			ProxyLaneConfigs:     proxyLaneConfigs,
+			ProxyLaneStrategy:    item.ProxyLaneStrategy,
 			Concurrency:          item.Concurrency,
 			Priority:             item.Priority,
 			RateMultiplier:       item.RateMultiplier,

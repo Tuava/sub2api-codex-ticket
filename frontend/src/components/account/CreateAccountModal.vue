@@ -3010,6 +3010,11 @@
             v-model="form.proxy_pool_ids"
             :proxies="proxies"
             :primary-proxy-id="form.proxy_id"
+            :lane-configs="form.proxy_lane_configs"
+            :lane-strategy="form.proxy_lane_strategy"
+            :account-concurrency="form.concurrency"
+            @update:lane-configs="form.proxy_lane_configs = $event"
+            @update:lane-strategy="form.proxy_lane_strategy = $event"
           />
           <p class="input-hint">{{ t('admin.accounts.proxyPoolHint') }}</p>
         </div>
@@ -3929,7 +3934,9 @@ import type {
   CodexSessionImportMessage,
   OpenAICompactMode,
   OpenAIResponsesMode,
-  OpenAIEndpointCapability
+  OpenAIEndpointCapability,
+  ProxyLaneConfig,
+  ProxyLaneStrategy
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -4734,6 +4741,8 @@ const form = reactive({
   credentials: {} as Record<string, unknown>,
   proxy_id: null as number | null,
   proxy_pool_ids: [] as number[],
+  proxy_lane_configs: [] as ProxyLaneConfig[],
+  proxy_lane_strategy: 'round_robin' as ProxyLaneStrategy,
   concurrency: 10,
   load_factor: null as number | null,
   priority: 1,
@@ -5220,7 +5229,9 @@ const withAntigravityConfirmFlag = (payload: CreateAccountRequest): CreateAccoun
 
 const createAccountWithProxyPool = (payload: CreateAccountRequest) => adminAPI.accounts.create({
   ...payload,
-  proxy_pool_ids: [...form.proxy_pool_ids]
+  proxy_pool_ids: [...form.proxy_pool_ids],
+  proxy_lane_configs: form.proxy_lane_configs.map((lane) => ({ ...lane })),
+  proxy_lane_strategy: form.proxy_lane_strategy
 })
 
 const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<void>): Promise<boolean> => {
@@ -5317,6 +5328,8 @@ const resetForm = () => {
   form.credentials = {}
   form.proxy_id = null
   form.proxy_pool_ids = []
+  form.proxy_lane_configs = []
+  form.proxy_lane_strategy = 'round_robin'
   form.concurrency = 10
   form.load_factor = null
   form.priority = 1
@@ -6146,6 +6159,8 @@ const handleGrokImportSSO = async (ssoInput: string) => {
       notes: form.notes || undefined,
       proxy_id: form.proxy_id,
       proxy_pool_ids: [...form.proxy_pool_ids],
+      proxy_lane_configs: form.proxy_lane_configs.map((lane) => ({ ...lane })),
+      proxy_lane_strategy: form.proxy_lane_strategy,
       group_ids: form.group_ids,
       credentials,
       concurrency: form.concurrency,
@@ -6462,6 +6477,8 @@ const handleOpenAIImportCodexSession = async (content: string) => {
       notes: form.notes || null,
       proxy_id: form.proxy_id,
       proxy_pool_ids: [...form.proxy_pool_ids],
+      proxy_lane_configs: form.proxy_lane_configs.map((lane) => ({ ...lane })),
+      proxy_lane_strategy: form.proxy_lane_strategy,
       concurrency: form.concurrency,
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,
@@ -6541,6 +6558,8 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
       notes: form.notes || null,
       proxy_id: form.proxy_id,
       proxy_pool_ids: [...form.proxy_pool_ids],
+      proxy_lane_configs: form.proxy_lane_configs.map((lane) => ({ ...lane })),
+      proxy_lane_strategy: form.proxy_lane_strategy,
       concurrency: form.concurrency,
       load_factor: form.load_factor ?? undefined,
       priority: form.priority,

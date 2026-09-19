@@ -962,6 +962,29 @@ export interface Proxy {
   updated_at: string
 }
 
+export type ProxyLaneStrategy = 'round_robin' | 'least_connections' | 'weighted'
+
+export interface ProxyLaneConfig {
+  proxy_id: number
+  enabled: boolean
+  max_concurrency: number
+  weight: number
+  timeout_seconds: number
+  error_circuit_threshold: number
+  circuit_cooldown_seconds: number
+  fallback_order: number
+}
+
+export interface ProxyLaneStatus extends ProxyLaneConfig {
+  name: string
+  primary: boolean
+  healthy: boolean
+  current_concurrency: number
+  circuit_open_until?: string | null
+  status: 'active' | 'inactive' | 'expired'
+  expires_at?: string | null
+}
+
 export interface ProxyAccountSummary {
   id: number
   name: string
@@ -1212,6 +1235,11 @@ export interface Account {
   } & Record<string, unknown>)
   proxy_id: number | null
   proxy_pool_ids?: number[]
+  proxy_pool?: Proxy[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
+  proxy_lanes?: ProxyLaneStatus[]
+  effective_concurrency?: number
   proxy_fallback_origin_id?: number | null
   proxy_fallback_origin_name?: string | null
   concurrency: number
@@ -1499,6 +1527,8 @@ export interface CreateAccountRequest {
   extra?: Record<string, unknown>
   proxy_id?: number | null
   proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   load_factor?: number | null
   priority?: number
@@ -1518,6 +1548,8 @@ export interface UpdateAccountRequest {
   extra?: Record<string, unknown>
   proxy_id?: number | null
   proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   load_factor?: number | null
   priority?: number
@@ -1618,6 +1650,8 @@ export interface AdminDataAccount {
   extra?: Record<string, unknown>
   proxy_key?: string | null
   proxy_pool_keys?: string[]
+  proxy_lane_configs?: Array<Omit<ProxyLaneConfig, 'proxy_id'> & { proxy_key: string }>
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency: number
   priority: number
   rate_multiplier?: number | null
@@ -1678,6 +1712,8 @@ export interface CodexSessionImportRequest {
   group_ids?: number[]
   proxy_id?: number | null
   proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   priority?: number
   rate_multiplier?: number
@@ -1698,6 +1734,8 @@ export interface OpenAICodexPATCreateRequest {
   group_ids?: number[]
   proxy_id?: number | null
   proxy_pool_ids?: number[]
+  proxy_lane_configs?: ProxyLaneConfig[]
+  proxy_lane_strategy?: ProxyLaneStrategy
   concurrency?: number
   priority?: number
   rate_multiplier?: number

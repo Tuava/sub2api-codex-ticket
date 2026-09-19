@@ -1655,6 +1655,11 @@
             v-model="form.proxy_pool_ids"
             :proxies="proxies"
             :primary-proxy-id="form.proxy_id"
+            :lane-configs="form.proxy_lane_configs"
+            :lane-strategy="form.proxy_lane_strategy"
+            :account-concurrency="form.concurrency"
+            @update:lane-configs="form.proxy_lane_configs = $event"
+            @update:lane-strategy="form.proxy_lane_strategy = $event"
           />
           <p class="input-hint">{{ t('admin.accounts.proxyPoolHint') }}</p>
         </div>
@@ -3091,7 +3096,9 @@ import type {
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
   GrokMediaEligibilityState,
-  SmartProxyAssignmentOptions
+  SmartProxyAssignmentOptions,
+  ProxyLaneConfig,
+  ProxyLaneStrategy
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -3991,6 +3998,8 @@ const form = reactive({
   notes: '',
   proxy_id: null as number | null,
   proxy_pool_ids: [] as number[],
+  proxy_lane_configs: [] as ProxyLaneConfig[],
+  proxy_lane_strategy: 'round_robin' as ProxyLaneStrategy,
   concurrency: 1,
   load_factor: null as number | null,
   priority: 1,
@@ -4109,6 +4118,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
   form.proxy_pool_ids = [...(newAccount.proxy_pool_ids ?? [])]
+  form.proxy_lane_configs = (newAccount.proxy_lane_configs ?? []).map((lane) => ({ ...lane }))
+  form.proxy_lane_strategy = newAccount.proxy_lane_strategy ?? 'round_robin'
   form.concurrency = newAccount.concurrency
   form.load_factor = newAccount.load_factor ?? null
   form.priority = newAccount.priority

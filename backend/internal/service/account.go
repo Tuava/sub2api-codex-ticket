@@ -62,11 +62,14 @@ type Account struct {
 	ParentAccountID *int64 // non-nil → 影子账号（不持凭据，透传母账号凭据）
 	QuotaDimension  string // 用量维度："" / "global" / "spark"
 
-	Proxy         *Proxy
-	ProxyPool     []*Proxy // 业务请求代理池；空时仅使用 Proxy
-	AccountGroups []AccountGroup
-	GroupIDs      []int64
-	Groups        []*Group
+	Proxy     *Proxy
+	ProxyPool []*Proxy // 业务请求代理池；空时仅使用 Proxy
+	// ProxyPoolHydrated distinguishes repository-loaded account snapshots from
+	// narrow test/plugin values that only carry a primary proxy object.
+	ProxyPoolHydrated bool
+	AccountGroups     []AccountGroup
+	GroupIDs          []int64
+	Groups            []*Group
 
 	// model_mapping 热路径缓存（非持久化字段）
 	modelMappingCache               map[string]string
@@ -87,6 +90,214 @@ type Account struct {
 }
 
 const AccountProxyPoolIDsExtraKey = "proxy_pool_ids"
+const (
+	AccountProxyLaneConfigsExtraKey   = "proxy_lane_configs"
+	AccountProxyLaneStrategyExtraKey  = "proxy_lane_strategy"
+	ProxyLaneStrategyRoundRobin       = "round_robin"
+	ProxyLaneStrategyLeastConnections = "least_connections"
+	ProxyLaneStrategyWeighted         = "weighted"
+)
+
+// ProxyLaneConfig controls one independent proxy lane. A zero max_concurrency
+// inherits an even share of the account limit. Weight defaults to 1.
+type ProxyLaneConfig struct {
+	ProxyID                int64 `json:"proxy_id"`
+	Enabled                bool  `json:"enabled"`
+	MaxConcurrency         int   `json:"max_concurrency"`
+	Weight                 int   `json:"weight"`
+	TimeoutSeconds         int   `json:"timeout_seconds"`
+	ErrorCircuitThreshold  int   `json:"error_circuit_threshold"`
+	CircuitCooldownSeconds int   `json:"circuit_cooldown_seconds"`
+	FallbackOrder          int   `json:"fallback_order"`
+}
+
+func proxyLaneInt(value any) int64 {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case float64:
+		if !math.IsNaN(v) && !math.IsInf(v, 0) && v == math.Trunc(v) && v <= math.MaxInt64 {
+			return int64(v)
+		}
+	case json.Number:
+		parsed, _ := v.Int64()
+		return parsed
+	}
+	return 0
+}
+
+func clampProxyLaneInt(value int64, minimum, maximum int) int {
+	parsed := int(value)
+	if parsed < minimum {
+		return minimum
+	}
+	if maximum > 0 && parsed > maximum {
+		return maximum
+	}
+	return parsed
+}
+
+func ProxyLaneStrategy(extra map[string]any) string {
+	if raw, ok := extra[AccountProxyLaneStrategyExtraKey].(string); ok {
+		switch raw {
+		case ProxyLaneStrategyLeastConnections, ProxyLaneStrategyWeighted:
+			return raw
+		}
+	}
+	return ProxyLaneStrategyRoundRobin
+}
+
+func AccountProxyLaneConfigs(extra map[string]any, primaryProxyID *int64, accountConcurrency int) []ProxyLaneConfig {
+	ids := make([]int64, 0, len(AccountProxyPoolIDs(extra))+1)
+	if primaryProxyID != nil && *primaryProxyID > 0 {
+		ids = append(ids, *primaryProxyID)
+	}
+	ids = append(ids, AccountProxyPoolIDs(extra)...)
+	if len(ids) == 0 {
+		return nil
+	}
+
+	configured := make(map[int64]ProxyLaneConfig, len(ids))
+	if typed, ok := extra[AccountProxyLaneConfigsExtraKey].([]ProxyLaneConfig); ok {
+		for _, cfg := range typed {
+			if cfg.ProxyID > 0 {
+				configured[cfg.ProxyID] = cfg
+			}
+		}
+	} else if raw, ok := extra[AccountProxyLaneConfigsExtraKey].([]any); ok {
+		for _, item := range raw {
+			row, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			id := proxyLaneInt(row["proxy_id"])
+			if id <= 0 {
+				continue
+			}
+			enabled := true
+			if value, exists := row["enabled"]; exists {
+				enabled, _ = value.(bool)
+			}
+			configured[id] = ProxyLaneConfig{
+				ProxyID:                id,
+				Enabled:                enabled,
+				MaxConcurrency:         clampProxyLaneInt(proxyLaneInt(row["max_concurrency"]), 0, 10000),
+				Weight:                 clampProxyLaneInt(proxyLaneInt(row["weight"]), 1, 1000),
+				TimeoutSeconds:         clampProxyLaneInt(proxyLaneInt(row["timeout_seconds"]), 0, 86400),
+				ErrorCircuitThreshold:  clampProxyLaneInt(proxyLaneInt(row["error_circuit_threshold"]), 0, 1000),
+				CircuitCooldownSeconds: clampProxyLaneInt(proxyLaneInt(row["circuit_cooldown_seconds"]), 0, 86400),
+				FallbackOrder:          clampProxyLaneInt(proxyLaneInt(row["fallback_order"]), 0, 1000),
+			}
+		}
+	}
+
+	defaultMaxForIndex := func(index int) int {
+		if accountConcurrency <= 0 {
+			return 1
+		}
+		base := accountConcurrency / len(ids)
+		remainder := accountConcurrency % len(ids)
+		value := base
+		if index < remainder {
+			value++
+		}
+		return max(1, value)
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	lanes := make([]ProxyLaneConfig, 0, len(ids))
+	for index, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		cfg, ok := configured[id]
+		defaultMax := defaultMaxForIndex(index)
+		if !ok {
+			cfg = ProxyLaneConfig{ProxyID: id, Enabled: true, MaxConcurrency: defaultMax, Weight: 1, FallbackOrder: index}
+		} else {
+			cfg.MaxConcurrency = clampProxyLaneInt(int64(cfg.MaxConcurrency), 0, 10000)
+			cfg.Weight = clampProxyLaneInt(int64(cfg.Weight), 1, 1000)
+			cfg.TimeoutSeconds = clampProxyLaneInt(int64(cfg.TimeoutSeconds), 0, 86400)
+			cfg.ErrorCircuitThreshold = clampProxyLaneInt(int64(cfg.ErrorCircuitThreshold), 0, 1000)
+			cfg.CircuitCooldownSeconds = clampProxyLaneInt(int64(cfg.CircuitCooldownSeconds), 0, 86400)
+			cfg.FallbackOrder = clampProxyLaneInt(int64(cfg.FallbackOrder), 0, 1000)
+			if cfg.MaxConcurrency <= 0 {
+				cfg.MaxConcurrency = defaultMax
+			}
+			if cfg.Weight <= 0 {
+				cfg.Weight = 1
+			}
+		}
+		lanes = append(lanes, cfg)
+	}
+	anyEnabled := false
+	for _, lane := range lanes {
+		if lane.Enabled {
+			anyEnabled = true
+			break
+		}
+	}
+	if !anyEnabled && len(lanes) > 0 {
+		lanes[0].Enabled = true
+	}
+	sort.SliceStable(lanes, func(i, j int) bool { return lanes[i].FallbackOrder < lanes[j].FallbackOrder })
+	return lanes
+}
+
+func NormalizeAccountProxyLaneExtra(extra map[string]any, primaryProxyID *int64, accountConcurrency int) map[string]any {
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	lanes := AccountProxyLaneConfigs(extra, primaryProxyID, accountConcurrency)
+	if len(lanes) == 0 {
+		delete(extra, AccountProxyLaneConfigsExtraKey)
+		delete(extra, AccountProxyLaneStrategyExtraKey)
+		return extra
+	}
+	extra[AccountProxyLaneConfigsExtraKey] = lanes
+	extra[AccountProxyLaneStrategyExtraKey] = ProxyLaneStrategy(extra)
+	return extra
+}
+
+func (a *Account) ProxyLaneConfigs() []ProxyLaneConfig {
+	if a == nil {
+		return nil
+	}
+	primaryProxyID := a.ProxyID
+	if primaryProxyID == nil && a.Proxy != nil && a.Proxy.ID > 0 {
+		id := a.Proxy.ID
+		primaryProxyID = &id
+	}
+	return AccountProxyLaneConfigs(a.Extra, primaryProxyID, a.Concurrency)
+}
+
+// EffectiveConcurrency is the strict account-level guard around independent
+// lanes. When lane limits are configured it equals their enabled capacity sum;
+// otherwise it preserves the legacy account concurrency value.
+func (a *Account) EffectiveConcurrency() int {
+	if a == nil {
+		return 0
+	}
+	lanes := a.ProxyLaneConfigs()
+	if len(lanes) == 0 {
+		return a.Concurrency
+	}
+	total := 0
+	for _, lane := range lanes {
+		if lane.Enabled && lane.MaxConcurrency > 0 {
+			total += lane.MaxConcurrency
+		}
+	}
+	if total > 0 {
+		return total
+	}
+	return a.Concurrency
+}
 
 func AccountProxyPoolIDs(extra map[string]any) []int64 {
 	if len(extra) == 0 {
@@ -176,7 +387,16 @@ func (a *Account) NextProxyURL() string {
 	if proxy := a.NextProxy(); proxy != nil {
 		return proxy.URL()
 	}
+	if len(AccountProxyPoolIDs(a.Extra)) > 0 {
+		return accountProxyLaneUnavailableURL
+	}
 	return ""
+}
+
+// NextProxyLaneURL selects a proxy for a real business request and marks it so
+// transport layers can reserve/release the corresponding independent lane.
+func (a *Account) NextProxyLaneURL() string {
+	return NextAccountProxyLaneURL(a)
 }
 
 func (a *Account) ProxyURLByID(proxyID int64) string {

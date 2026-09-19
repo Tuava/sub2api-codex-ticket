@@ -212,7 +212,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		PreferredConnID: preferredConnID,
 		ForceNewConn:    forceNewConn,
 		ProxyURL: func() string {
-			return account.NextProxyURL()
+			return account.NextProxyLaneURL()
 		}(),
 	})
 	if err != nil {

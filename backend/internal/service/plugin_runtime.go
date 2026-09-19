@@ -290,7 +290,7 @@ func (r *pluginRuntime) roundTrip(ctx context.Context, request *http.Request, pr
 		Headers:            headersToPlugin(request.Header),
 		ProxyUrl:           proxyURL,
 		AccountId:          account.ID,
-		AccountConcurrency: int32(account.Concurrency),
+		AccountConcurrency: int32(account.EffectiveConcurrency()),
 		Platform:           account.Platform,
 		AccountType:        account.Type,
 		ContentLength:      request.ContentLength,

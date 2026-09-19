@@ -129,46 +129,50 @@ func NewAccountHandler(
 
 // CreateAccountRequest represents create account request
 type CreateAccountRequest struct {
-	Name                    string         `json:"name" binding:"required"`
-	Notes                   *string        `json:"notes"`
-	Platform                string         `json:"platform" binding:"required"`
-	Type                    string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
-	Credentials             map[string]any `json:"credentials" binding:"required"`
-	Extra                   map[string]any `json:"extra"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	ProxyPoolIDs            []int64        `json:"proxy_pool_ids"`
-	Concurrency             int            `json:"concurrency"`
-	Priority                int            `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	GroupIDs                []int64        `json:"group_ids"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	Name                    string                    `json:"name" binding:"required"`
+	Notes                   *string                   `json:"notes"`
+	Platform                string                    `json:"platform" binding:"required"`
+	Type                    string                    `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Credentials             map[string]any            `json:"credentials" binding:"required"`
+	Extra                   map[string]any            `json:"extra"`
+	ProxyID                 *int64                    `json:"proxy_id"`
+	ProxyPoolIDs            []int64                   `json:"proxy_pool_ids"`
+	ProxyLaneConfigs        []service.ProxyLaneConfig `json:"proxy_lane_configs"`
+	ProxyLaneStrategy       string                    `json:"proxy_lane_strategy"`
+	Concurrency             int                       `json:"concurrency"`
+	Priority                int                       `json:"priority"`
+	RateMultiplier          *float64                  `json:"rate_multiplier"`
+	LoadFactor              *int                      `json:"load_factor"`
+	GroupIDs                []int64                   `json:"group_ids"`
+	ExpiresAt               *int64                    `json:"expires_at"`
+	AutoPauseOnExpired      *bool                     `json:"auto_pause_on_expired"`
+	ProbeEnabled            *bool                     `json:"upstream_billing_probe_enabled"`
+	ConfirmMixedChannelRisk *bool                     `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 // UpdateAccountRequest represents update account request
 // 使用指针类型来区分"未提供"和"设置为0"
 type UpdateAccountRequest struct {
-	Name                    string         `json:"name"`
-	Notes                   *string        `json:"notes"`
-	Type                    string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
-	Credentials             map[string]any `json:"credentials"`
-	Extra                   map[string]any `json:"extra"`
-	ProxyID                 *int64         `json:"proxy_id"`
-	ProxyPoolIDs            *[]int64       `json:"proxy_pool_ids"`
-	Concurrency             *int           `json:"concurrency"`
-	Priority                *int           `json:"priority"`
-	RateMultiplier          *float64       `json:"rate_multiplier"`
-	LoadFactor              *int           `json:"load_factor"`
-	Status                  string         `json:"status" binding:"omitempty,oneof=active inactive error"`
-	GroupIDs                *[]int64       `json:"group_ids"`
-	ExpiresAt               *int64         `json:"expires_at"`
-	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
-	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
-	RateSyncEnabled         *bool          `json:"upstream_billing_rate_sync_enabled"`
-	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	Name                    string                     `json:"name"`
+	Notes                   *string                    `json:"notes"`
+	Type                    string                     `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Credentials             map[string]any             `json:"credentials"`
+	Extra                   map[string]any             `json:"extra"`
+	ProxyID                 *int64                     `json:"proxy_id"`
+	ProxyPoolIDs            *[]int64                   `json:"proxy_pool_ids"`
+	ProxyLaneConfigs        *[]service.ProxyLaneConfig `json:"proxy_lane_configs"`
+	ProxyLaneStrategy       *string                    `json:"proxy_lane_strategy"`
+	Concurrency             *int                       `json:"concurrency"`
+	Priority                *int                       `json:"priority"`
+	RateMultiplier          *float64                   `json:"rate_multiplier"`
+	LoadFactor              *int                       `json:"load_factor"`
+	Status                  string                     `json:"status" binding:"omitempty,oneof=active inactive error"`
+	GroupIDs                *[]int64                   `json:"group_ids"`
+	ExpiresAt               *int64                     `json:"expires_at"`
+	AutoPauseOnExpired      *bool                      `json:"auto_pause_on_expired"`
+	ProbeEnabled            *bool                      `json:"upstream_billing_probe_enabled"`
+	RateSyncEnabled         *bool                      `json:"upstream_billing_rate_sync_enabled"`
+	ConfirmMixedChannelRisk *bool                      `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 // BulkUpdateAccountsRequest represents the payload for bulk editing accounts
@@ -250,10 +254,12 @@ type CheckMixedChannelRequest struct {
 // AccountWithConcurrency extends Account with real-time concurrency info
 type AccountWithConcurrency struct {
 	*dto.Account
-	simpleMode         bool                         `json:"-"`
-	CurrentConcurrency int                          `json:"current_concurrency"`
-	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
-	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
+	simpleMode           bool                         `json:"-"`
+	CurrentConcurrency   int                          `json:"current_concurrency"`
+	EffectiveConcurrency int                          `json:"effective_concurrency"`
+	ProxyLanes           []service.ProxyLaneStatus    `json:"proxy_lanes,omitempty"`
+	SchedulerScore       *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
+	SchedulerScores      []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
 	// 以下字段仅对 Anthropic OAuth/SetupToken 账号有效，且仅在启用相应功能时返回
 	CurrentWindowCost *float64 `json:"current_window_cost,omitempty"` // 当前窗口费用
 	ActiveSessions    *int     `json:"active_sessions,omitempty"`     // 当前活跃会话数
@@ -265,12 +271,54 @@ type AccountWithConcurrency struct {
 // so groups/account_groups never appear in the list payload.
 type AccountListItemWithConcurrency struct {
 	*dto.AccountListItem
-	CurrentConcurrency int                          `json:"current_concurrency"`
-	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
-	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
-	CurrentWindowCost  *float64                     `json:"current_window_cost,omitempty"`
-	ActiveSessions     *int                         `json:"active_sessions,omitempty"`
-	CurrentRPM         *int                         `json:"current_rpm,omitempty"`
+	CurrentConcurrency   int                          `json:"current_concurrency"`
+	EffectiveConcurrency int                          `json:"effective_concurrency"`
+	ProxyLanes           []service.ProxyLaneStatus    `json:"proxy_lanes,omitempty"`
+	SchedulerScore       *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
+	SchedulerScores      []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
+	CurrentWindowCost    *float64                     `json:"current_window_cost,omitempty"`
+	ActiveSessions       *int                         `json:"active_sessions,omitempty"`
+	CurrentRPM           *int                         `json:"current_rpm,omitempty"`
+}
+
+type ProxyLaneRuntimeRequest struct {
+	AccountIDs []int64 `json:"account_ids" binding:"required"`
+}
+
+type ProxyLaneRuntimeItem struct {
+	EffectiveConcurrency int                       `json:"effective_concurrency"`
+	Lanes                []service.ProxyLaneStatus `json:"lanes"`
+}
+
+// GetProxyLaneRuntime returns a lightweight live snapshot for the visible
+// account rows. It avoids re-running the full account-list query every three
+// seconds while preserving exact in-process request lifecycle counters.
+func (h *AccountHandler) GetProxyLaneRuntime(c *gin.Context) {
+	var req ProxyLaneRuntimeRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.AccountIDs) == 0 {
+		response.BadRequest(c, "account_ids is required")
+		return
+	}
+	if len(req.AccountIDs) > 200 {
+		response.BadRequest(c, "account_ids exceeds 200")
+		return
+	}
+	accounts, err := h.adminService.GetAccountsByIDs(c.Request.Context(), req.AccountIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	items := make(map[string]ProxyLaneRuntimeItem, len(accounts))
+	for _, account := range accounts {
+		if account == nil {
+			continue
+		}
+		items[strconv.FormatInt(account.ID, 10)] = ProxyLaneRuntimeItem{
+			EffectiveConcurrency: account.EffectiveConcurrency(),
+			Lanes:                service.AccountProxyLaneStatuses(account),
+		}
+	}
+	response.Success(c, gin.H{"items": items})
 }
 
 type simpleModeGroupReference struct {
@@ -438,6 +486,8 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 	if account == nil {
 		return item
 	}
+	item.EffectiveConcurrency = account.EffectiveConcurrency()
+	item.ProxyLanes = service.AccountProxyLaneStatuses(account)
 
 	if h.concurrencyService != nil {
 		if counts, err := h.concurrencyService.GetAccountConcurrencyBatch(ctx, []int64{account.ID}); err == nil {
@@ -865,11 +915,13 @@ func (h *AccountHandler) List(c *gin.Context) {
 			}
 		}
 		item := AccountWithConcurrency{
-			Account:            accountResponse,
-			simpleMode:         h.isSimpleMode(),
-			CurrentConcurrency: concurrencyCounts[acc.ID],
-			SchedulerScore:     schedulerScores[acc.ID],
-			SchedulerScores:    schedulerGroupScores[acc.ID],
+			Account:              accountResponse,
+			simpleMode:           h.isSimpleMode(),
+			CurrentConcurrency:   concurrencyCounts[acc.ID],
+			EffectiveConcurrency: acc.EffectiveConcurrency(),
+			ProxyLanes:           service.AccountProxyLaneStatuses(acc),
+			SchedulerScore:       schedulerScores[acc.ID],
+			SchedulerScores:      schedulerGroupScores[acc.ID],
 		}
 
 		// 添加窗口费用（仅当启用时）
@@ -903,13 +955,15 @@ func (h *AccountHandler) List(c *gin.Context) {
 		for i := range result {
 			item := result[i]
 			compact[i] = AccountListItemWithConcurrency{
-				AccountListItem:    dto.AccountListItemFromAccount(item.Account),
-				CurrentConcurrency: item.CurrentConcurrency,
-				SchedulerScore:     item.SchedulerScore,
-				SchedulerScores:    item.SchedulerScores,
-				CurrentWindowCost:  item.CurrentWindowCost,
-				ActiveSessions:     item.ActiveSessions,
-				CurrentRPM:         item.CurrentRPM,
+				AccountListItem:      dto.AccountListItemFromAccount(item.Account),
+				CurrentConcurrency:   item.CurrentConcurrency,
+				EffectiveConcurrency: item.EffectiveConcurrency,
+				ProxyLanes:           item.ProxyLanes,
+				SchedulerScore:       item.SchedulerScore,
+				SchedulerScores:      item.SchedulerScores,
+				CurrentWindowCost:    item.CurrentWindowCost,
+				ActiveSessions:       item.ActiveSessions,
+				CurrentRPM:           item.CurrentRPM,
 			}
 		}
 		etag := buildAccountsListETag(compact, total, page, pageSize, platform, accountType, status, search, true)
@@ -1130,6 +1184,8 @@ func (h *AccountHandler) Create(c *gin.Context) {
 			Extra:                 req.Extra,
 			ProxyID:               req.ProxyID,
 			ProxyPoolIDs:          req.ProxyPoolIDs,
+			ProxyLaneConfigs:      req.ProxyLaneConfigs,
+			ProxyLaneStrategy:     req.ProxyLaneStrategy,
 			Concurrency:           req.Concurrency,
 			Priority:              req.Priority,
 			RateMultiplier:        req.RateMultiplier,
@@ -1262,6 +1318,8 @@ func (h *AccountHandler) Update(c *gin.Context) {
 		Extra:                 req.Extra,
 		ProxyID:               req.ProxyID,
 		ProxyPoolIDs:          req.ProxyPoolIDs,
+		ProxyLaneConfigs:      req.ProxyLaneConfigs,
+		ProxyLaneStrategy:     req.ProxyLaneStrategy,
 		Concurrency:           req.Concurrency, // 指针类型，nil 表示未提供
 		Priority:              req.Priority,    // 指针类型，nil 表示未提供
 		RateMultiplier:        req.RateMultiplier,
@@ -2212,6 +2270,8 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 				Extra:                 item.Extra,
 				ProxyID:               item.ProxyID,
 				ProxyPoolIDs:          item.ProxyPoolIDs,
+				ProxyLaneConfigs:      item.ProxyLaneConfigs,
+				ProxyLaneStrategy:     item.ProxyLaneStrategy,
 				Concurrency:           item.Concurrency,
 				Priority:              item.Priority,
 				RateMultiplier:        item.RateMultiplier,

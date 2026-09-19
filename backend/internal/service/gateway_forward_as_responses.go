@@ -125,7 +125,7 @@ func (s *GatewayService) ForwardAsResponses(
 	}
 
 	// 9. Get proxy URL
-	proxyURL := account.NextProxyURL()
+	proxyURL := account.NextProxyLaneURL()
 
 	// 10. Build upstream request
 	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)

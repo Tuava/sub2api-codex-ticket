@@ -94,3 +94,77 @@ func TestNormalizeAccountProxyPoolExtraDropsPrimaryAndDuplicates(t *testing.T) {
 	}, &primaryID)
 	require.Equal(t, []int64{3, 4}, AccountProxyPoolIDs(extra))
 }
+
+func TestProxyLanesRespectCapacityAndRelease(t *testing.T) {
+	account := &Account{
+		ID:          91004,
+		Proxy:       testAccountProxy(1, StatusActive, nil),
+		ProxyPool:   []*Proxy{testAccountProxy(2, StatusActive, nil)},
+		Concurrency: 4,
+		Extra: map[string]any{
+			AccountProxyPoolIDsExtraKey: []int64{2},
+			AccountProxyLaneConfigsExtraKey: []ProxyLaneConfig{
+				{ProxyID: 1, Enabled: true, MaxConcurrency: 1, Weight: 1},
+				{ProxyID: 2, Enabled: true, MaxConcurrency: 2, Weight: 2},
+			},
+			AccountProxyLaneStrategyExtraKey: ProxyLaneStrategyLeastConnections,
+		},
+	}
+	accountProxyPools.Delete(account.ID)
+	RegisterAccountProxyPool(account)
+	t.Cleanup(func() { accountProxyPools.Delete(account.ID) })
+
+	firstURL, firstID, _, firstTimeout, firstRelease, err := AcquireAccountProxyLaneForURL(account.ID, account.NextProxyLaneURL())
+	require.NoError(t, err)
+	require.NotEmpty(t, firstURL)
+	require.Zero(t, firstTimeout)
+	require.NotZero(t, firstID)
+	secondURL, secondID, _, _, secondRelease, err := AcquireAccountProxyLaneForURL(account.ID, account.NextProxyLaneURL())
+	require.NoError(t, err)
+	require.NotEmpty(t, secondURL)
+	require.NotEqual(t, firstID, secondID, "least-connections should move to the idle lane")
+	_, thirdID, _, _, thirdRelease, err := AcquireAccountProxyLaneForURL(account.ID, account.NextProxyLaneURL())
+	require.NoError(t, err)
+	require.NotZero(t, thirdID)
+
+	statuses := AccountProxyLaneStatuses(account)
+	require.Len(t, statuses, 2)
+	current := map[int64]int{}
+	for _, status := range statuses {
+		current[status.ProxyID] = status.CurrentConcurrency
+	}
+	require.Equal(t, 1, current[firstID])
+	require.GreaterOrEqual(t, current[secondID], 1)
+
+	firstRelease(true)
+	secondRelease(true)
+	thirdRelease(true)
+	for _, status := range AccountProxyLaneStatuses(account) {
+		require.Equal(t, 0, status.CurrentConcurrency)
+	}
+}
+
+func TestProxyLaneCircuitBreaksAfterTransportFailures(t *testing.T) {
+	account := &Account{
+		ID: 91005, Proxy: testAccountProxy(1, StatusActive, nil), Concurrency: 2,
+		Extra: map[string]any{
+			AccountProxyPoolIDsExtraKey: []int64{2},
+			AccountProxyLaneConfigsExtraKey: []ProxyLaneConfig{
+				{ProxyID: 1, Enabled: true, MaxConcurrency: 1, ErrorCircuitThreshold: 1, CircuitCooldownSeconds: 60},
+				{ProxyID: 2, Enabled: true, MaxConcurrency: 1},
+			},
+		},
+		ProxyPool: []*Proxy{testAccountProxy(2, StatusActive, nil)},
+	}
+	RegisterAccountProxyPool(account)
+	t.Cleanup(func() { accountProxyPools.Delete(account.ID) })
+
+	_, id, _, _, release, err := AcquireAccountProxyLaneForURL(account.ID, markAccountProxyLaneURL(account.Proxy.URL(), account.ID, 1))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), id)
+	release(false)
+
+	_, id, _, _, _, err = AcquireAccountProxyLaneForURL(account.ID, markAccountProxyLaneURL(account.Proxy.URL(), account.ID, 1))
+	require.NoError(t, err)
+	require.Equal(t, int64(2), id, "open circuit should fall back to the next healthy lane")
+}
