@@ -13,6 +13,16 @@ Do not copy a new official source tree over this repository and do not squash of
 
 ## Upgrade
 
+### GitHub automation
+
+`.github/workflows/upstream-sync.yml` checks the latest official release every day. It performs a three-way merge on a dedicated branch, runs the full backend suite and frontend production build, then opens a PR. If Git reports conflicts, the workflow leaves `main` untouched and opens/updates an Issue containing the conflicted files.
+
+The workflow can also be started manually from **Actions → Upstream Sync → Run workflow**, following either the latest official release, official `main`, or an explicit tag/ref.
+
+Always merge the generated sync PR with a **merge commit**. Squashing or rebasing it discards official ancestry and makes later updates harder.
+
+### Local fallback
+
 From a clean Tuava branch:
 
 ```bash
