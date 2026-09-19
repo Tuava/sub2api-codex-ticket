@@ -68,6 +68,7 @@ const setInputFiles = (element: Element, files: File[]) => {
 describe('ImportDataModal', () => {
   beforeEach(async () => {
     localStorage.clear()
+    vi.stubGlobal('confirm', vi.fn(() => true))
     showError.mockReset()
     showSuccess.mockReset()
     showWarning.mockReset()
@@ -188,7 +189,7 @@ describe('ImportDataModal', () => {
     expect(showSuccess).toHaveBeenCalledWith('admin.accounts.dataImportSuccess')
   })
 
-  it('可在 JSON 导入后自动执行智能代理分配', async () => {
+  it('配置方案可同时保存批量编辑和智能代理并用于导入', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
       proxy_created: 0,
@@ -198,41 +199,6 @@ describe('ImportDataModal', () => {
       account_failed: 0,
       proxy_assigned: 1,
       proxy_assign_failed: 0
-    })
-    const wrapper = mountModal()
-    await wrapper.get('[data-testid="smart-proxy-enabled"]').setValue(true)
-    await wrapper.get('[data-testid="smart-proxy-count"]').setValue(3)
-    const input = wrapper.find('[data-testid="account-import-file-input"]')
-    setInputFiles(input.element, [makeJsonFile(
-      'data.json',
-      JSON.stringify({ exported_at: '2026-07-05T00:00:00Z', proxies: [], accounts: [{ name: 'a' }] })
-    )])
-    await input.trigger('change')
-    await wrapper.find('form').trigger('submit')
-    await flushPromises()
-
-    expect(adminAPI.accounts.importData).toHaveBeenCalledWith(expect.objectContaining({
-      smart_proxy_assignment: {
-        enabled: true,
-        proxy_count: 3,
-        test_latency: true,
-        prefer_low_latency: true,
-        low_latency_limit: 0,
-        weighted_by_load: true
-      }
-    }))
-  })
-
-  it('可复用完整批量编辑面板生成导入后配置', async () => {
-    const { adminAPI } = await import('@/api/admin')
-    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
-      proxy_created: 0,
-      proxy_reused: 0,
-      proxy_failed: 0,
-      account_created: 1,
-      account_failed: 0,
-      post_import_updated: 1,
-      post_import_failed: 0
     })
     const wrapper = mountModal()
     const input = wrapper.find('[data-testid="account-import-file-input"]')
@@ -245,28 +211,30 @@ describe('ImportDataModal', () => {
       })
     )])
     await input.trigger('change')
-    await flushPromises()
-
-    await wrapper.get('[data-testid="open-import-bulk-config"]').trigger('click')
+    await wrapper.get('[data-testid="new-import-profile"]').trigger('click')
+    await wrapper.get('[data-testid="import-profile-editor-name"]').setValue('代理并发')
     await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
     await wrapper.get('#bulk-edit-concurrency').setValue(6)
-    await wrapper.get('#bulk-edit-priority-enabled').setValue(true)
-    await wrapper.get('#bulk-edit-priority').setValue(9)
+    await wrapper.get('[data-testid="smart-proxy-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="smart-proxy-count"]').setValue(3)
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="import-bulk-config-ready"]').exists()).toBe(true)
     await wrapper.get('#import-data-form').trigger('submit.prevent')
     await flushPromises()
+
     expect(adminAPI.accounts.importData).toHaveBeenCalledWith(expect.objectContaining({
-      post_import_updates: {
-        concurrency: 6,
-        priority: 9
+      post_import_updates: { concurrency: 6 },
+      smart_proxy_assignment: {
+        enabled: true,
+        proxy_count: 3,
+        test_latency: true,
+        prefer_low_latency: true,
+        low_latency_limit: 0,
+        weighted_by_load: true
       }
     }))
   })
 
-  it('可保存多套导入配置并一键切换', async () => {
+  it('以列表保存多套方案并一键切换', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
       proxy_created: 0,
@@ -291,26 +259,23 @@ describe('ImportDataModal', () => {
     await flushPromises()
 
     const configure = async (concurrency: number, name: string) => {
-      await wrapper.get('[data-testid="open-import-bulk-config"]').trigger('click')
+      await wrapper.get('[data-testid="new-import-profile"]').trigger('click')
+      await wrapper.get('[data-testid="import-profile-editor-name"]').setValue(name)
       await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
       await wrapper.get('#bulk-edit-concurrency').setValue(concurrency)
       await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
       await flushPromises()
-      await wrapper.get('[data-testid="import-profile-name"]').setValue(name)
-      await wrapper.get('[data-testid="save-import-profile"]').trigger('click')
     }
 
     await configure(4, '低并发')
     await configure(12, '高并发')
-    expect(wrapper.findAll('[data-testid^="import-profile-"]').filter(
-      (node) => node.attributes('data-testid') !== 'import-profile-list' && node.attributes('data-testid') !== 'import-profile-name'
-    )).toHaveLength(2)
+    expect(wrapper.findAll('[data-testid^="import-profile-row-"]')).toHaveLength(2)
 
-    const lowProfile = wrapper.findAll('[data-testid^="import-profile-"]').find(
-      (button) => button.text() === '低并发'
+    const lowProfile = wrapper.findAll('[data-testid^="import-profile-row-"]').find(
+      (row) => row.text().includes('低并发')
     )
     expect(lowProfile).toBeDefined()
-    await lowProfile!.trigger('click')
+    await lowProfile!.find('button.btn-primary').trigger('click')
     await wrapper.get('#import-data-form').trigger('submit.prevent')
     await flushPromises()
 
@@ -321,7 +286,7 @@ describe('ImportDataModal', () => {
     expect(stored.map((profile: { name: string }) => profile.name)).toEqual(['低并发', '高并发'])
   })
 
-  it('重新打开弹窗后仍可读取已保存方案', async () => {
+  it('读取已保存方案并在编辑器中完整反填', async () => {
     localStorage.setItem('sub2api:admin:account-import-profiles:v1', JSON.stringify([{
       id: 'saved-profile',
       name: '常用方案',
@@ -340,8 +305,68 @@ describe('ImportDataModal', () => {
     }]))
     const wrapper = mountModal()
     expect(wrapper.text()).toContain('常用方案')
-    await wrapper.get('[data-testid="import-profile-saved-profile"]').trigger('click')
-    expect(wrapper.get<HTMLInputElement>('[data-testid="import-profile-name"]').element.value).toBe('常用方案')
+    expect(wrapper.get('[data-testid="import-profile-row-saved-profile"]').text()).toContain(
+      'admin.accounts.dataImportProfilePriority'
+    )
+    await wrapper.get('[data-testid="edit-import-profile-saved-profile"]').trigger('click')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="import-profile-editor-name"]').element.value).toBe('常用方案')
+    expect(wrapper.get<HTMLInputElement>('#bulk-edit-priority-enabled').element.checked).toBe(true)
+    expect(wrapper.get<HTMLInputElement>('#bulk-edit-priority').element.value).toBe('8')
+  })
+
+  it('支持复制、删除和导入配置方案', async () => {
+    localStorage.setItem('sub2api:admin:account-import-profiles:v1', JSON.stringify([{
+      id: 'base-profile',
+      name: '基础方案',
+      post_import_updates: { concurrency: 4 },
+      smart_proxy_assignment: {
+        enabled: true,
+        proxy_count: 2,
+        test_latency: true,
+        prefer_low_latency: true,
+        low_latency_limit: 10,
+        weighted_by_load: true
+      },
+      platforms: ['openai'],
+      account_types: ['apikey'],
+      updated_at: '2026-09-19T00:00:00Z'
+    }]))
+    const wrapper = mountModal()
+
+    await wrapper.get('[data-testid="copy-import-profile-base-profile"]').trigger('click')
+    expect(wrapper.findAll('[data-testid^="import-profile-row-"]')).toHaveLength(2)
+    expect(wrapper.text()).toContain('admin.accounts.dataImportProfileCopyName')
+
+    await wrapper.get('[data-testid="delete-import-profile-base-profile"]').trigger('click')
+    expect(wrapper.findAll('[data-testid^="import-profile-row-"]')).toHaveLength(1)
+
+    const importedProfile = {
+      type: 'sub2api-account-import-profile',
+      version: 1,
+      exported_at: '2026-09-19T01:00:00Z',
+      profile: {
+        id: 'external',
+        name: '外部方案',
+        post_import_updates: { priority: 9 },
+        smart_proxy_assignment: {
+          enabled: false,
+          proxy_count: 2,
+          test_latency: true,
+          prefer_low_latency: true,
+          low_latency_limit: 0,
+          weighted_by_load: true
+        },
+        platforms: ['openai'],
+        account_types: ['oauth'],
+        updated_at: '2026-09-19T01:00:00Z'
+      }
+    }
+    const profileInput = wrapper.get('[data-testid="profile-import-file-input"]')
+    setInputFiles(profileInput.element, [makeJsonFile('profile.json', JSON.stringify(importedProfile))])
+    await profileInput.trigger('change')
+    await flushPromises()
+    expect(wrapper.text()).toContain('外部方案')
+    expect(wrapper.findAll('[data-testid^="import-profile-row-"]')).toHaveLength(2)
   })
 
   it('部分成功时关闭弹窗仍通知父组件刷新', async () => {

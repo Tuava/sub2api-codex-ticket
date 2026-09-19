@@ -1,11 +1,24 @@
 <template>
   <BaseDialog
     :show="show"
-    :title="configOnly ? t('admin.accounts.dataImportBulkConfigTitle') : t('admin.accounts.bulkEdit.title')"
+    :title="configOnly ? t('admin.accounts.dataImportProfileEditorTitle') : t('admin.accounts.bulkEdit.title')"
     width="wide"
     @close="handleClose"
   >
     <form id="bulk-edit-account-form" class="space-y-5" @submit.prevent="() => handleSubmit()">
+      <div v-if="configOnly">
+        <label class="input-label" for="import-profile-editor-name">
+          {{ t('admin.accounts.dataImportProfileName') }}
+        </label>
+        <input
+          id="import-profile-editor-name"
+          v-model="configProfileName"
+          data-testid="import-profile-editor-name"
+          class="input"
+          :placeholder="t('admin.accounts.dataImportProfileNamePlaceholder')"
+        />
+      </div>
+
       <!-- Info -->
       <div class="rounded-lg bg-blue-50 p-4 dark:bg-blue-900/20">
         <p class="text-sm text-blue-700 dark:text-blue-400">
@@ -693,10 +706,12 @@
       </div>
 
       <!-- Smart random proxy assignment -->
-      <div v-if="!configOnly" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <SmartProxyAssignmentPanel
           v-model="smartProxyOptions"
           :loading="assigningSmartProxies"
+          :show-action="!configOnly"
+          :show-enable="configOnly"
           @apply="handleSmartProxyAssignment"
         />
       </div>
@@ -1509,12 +1524,14 @@ import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.
 import Icon from '@/components/icons/Icon.vue'
 import {
   buildModelMappingObject as buildModelMappingPayload,
-  getPresetMappingsByPlatform
+  getPresetMappingsByPlatform,
+  splitModelMappingObject
 } from '@/composables/useModelWhitelist'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import {
   buildHeaderOverridesObject,
   isHeaderOverrideCapable,
+  splitHeaderOverridesObject,
   validateHeaderOverrideRows,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
@@ -1547,15 +1564,32 @@ interface Props {
   proxies: ProxyConfig[]
   groups: AdminGroup[]
   configOnly?: boolean
+  profileName?: string
+  initialUpdates?: Record<string, unknown> | null
+  initialSmartProxyOptions?: SmartProxyAssignmentOptions
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  configOnly: false
+  configOnly: false,
+  profileName: '',
+  initialUpdates: null,
+  initialSmartProxyOptions: () => ({
+    enabled: false,
+    proxy_count: 2,
+    test_latency: true,
+    prefer_low_latency: true,
+    low_latency_limit: 0,
+    weighted_by_load: true
+  })
 })
 const emit = defineEmits<{
   close: []
   updated: []
-  configured: [updates: Record<string, unknown>]
+  configured: [config: {
+    name: string
+    updates: Record<string, unknown> | null
+    smart_proxy_assignment: SmartProxyAssignmentOptions
+  }]
 }>()
 
 const { t } = useI18n()
@@ -1702,6 +1736,7 @@ const smartProxyOptions = ref<SmartProxyAssignmentOptions>({
   weighted_by_load: true
 })
 const assigningSmartProxies = ref(false)
+const configProfileName = ref('')
 
 // State - field values
 const submitting = ref(false)
@@ -2214,7 +2249,8 @@ const handleSmartProxyAssignment = async () => {
     const accountIds = targetMode.value === 'filtered' && props.target?.filters
       ? await fetchAllAccountIds(adminAPI.accounts.list, props.target.filters)
       : props.accountIds
-    const result = await adminAPI.accounts.smartAssignProxies(accountIds, smartProxyOptions.value)
+    const { enabled: _enabled, ...assignmentOptions } = smartProxyOptions.value
+    const result = await adminAPI.accounts.smartAssignProxies(accountIds, assignmentOptions)
     if (result.success > 0) {
       appStore.showSuccess(t('admin.accounts.smartProxy.success', {
         success: result.success,
@@ -2289,7 +2325,7 @@ const handleSubmit = async () => {
     enableRpmLimit.value ||
     userMsgQueueMode.value !== null
 
-  if (!hasAnyFieldEnabled) {
+  if (!hasAnyFieldEnabled && !(props.configOnly && smartProxyOptions.value.enabled)) {
     appStore.showError(t('admin.accounts.bulkEdit.noFieldsSelected'))
     return
   }
@@ -2319,19 +2355,29 @@ const handleSubmit = async () => {
   }
 
   const built = buildUpdatePayload()
-  if (!built) {
+  if (!built && !(props.configOnly && smartProxyOptions.value.enabled)) {
     appStore.showError(t('admin.accounts.bulkEdit.noFieldsSelected'))
     return
   }
 
   if (props.configOnly) {
-    if (enableGroups.value) {
+    const name = configProfileName.value.trim()
+    if (!name) {
+      appStore.showError(t('admin.accounts.dataImportProfileNameRequired'))
+      return
+    }
+    if (built && enableGroups.value) {
       built.confirm_mixed_channel_risk = true
     }
-    emit('configured', built)
-    handleClose()
+    emit('configured', {
+      name,
+      updates: built,
+      smart_proxy_assignment: { ...smartProxyOptions.value }
+    })
     return
   }
+
+  if (!built) return
 
   const canContinue = await preCheckMixedChannelRisk(built)
   if (!canContinue) return
@@ -2415,81 +2461,257 @@ const handleMixedChannelCancel = () => {
   pendingUpdatesForConfirm.value = null
 }
 
-// Reset form when modal closes
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+
+const hasOwn = (value: Record<string, unknown>, key: string) =>
+  Object.prototype.hasOwnProperty.call(value, key)
+
+const resetBulkEditForm = () => {
+  enableBaseUrl.value = false
+  enableModelRestriction.value = false
+  enableCustomErrorCodes.value = false
+  enableInterceptWarmup.value = false
+  enableHeaderOverride.value = false
+  enableProxy.value = false
+  enableConcurrency.value = false
+  enableLoadFactor.value = false
+  enablePriority.value = false
+  enableRateMultiplier.value = false
+  enableStatus.value = false
+  enableGroups.value = false
+  enableOpenAIPassthrough.value = false
+  enableOpenAIFlattenNamespaces.value = false
+  enableOpenAILongContextBilling.value = false
+  enableOpenAIEndpointCapabilities.value = false
+  enableOpenAIResponsesMode.value = false
+  enableOpenAIWSMode.value = false
+  enableOpenAIAPIKeyWSMode.value = false
+  enableUpstreamBillingAutoProbe.value = false
+  enableCodexCLIOnly.value = false
+  enableCodexCLIOnlyAppServer.value = false
+  enableCodexFingerprintMode.value = false
+  enableOpenAICompactMode.value = false
+  enableOpenAICompactModelMapping.value = false
+  enableRpmLimit.value = false
+
+  configProfileName.value = ''
+  baseUrl.value = ''
+  openaiPassthroughEnabled.value = false
+  openaiFlattenNamespacesEnabled.value = false
+  openAILongContextBillingEnabled.value = false
+  openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
+  openAIResponsesMode.value = 'auto'
+  modelRestrictionMode.value = 'whitelist'
+  allowedModels.value = []
+  modelMappings.value = []
+  selectedErrorCodes.value = []
+  customErrorCodeInput.value = null
+  interceptWarmupRequests.value = false
+  headerOverrideEnabled.value = false
+  headerOverrideRows.value = []
+  proxyId.value = null
+  concurrency.value = 1
+  loadFactor.value = null
+  priority.value = 1
+  rateMultiplier.value = 1
+  status.value = 'active'
+  groupIds.value = []
+  openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+  openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+  upstreamBillingAutoProbeMode.value = 'enabled'
+  codexCLIOnlyEnabled.value = false
+  codexCLIOnlyAppServerEnabled.value = false
+  codexFingerprintMode.value = 'off'
+  openAICompactMode.value = 'auto'
+  openAICompactModelMappings.value = []
+  rpmLimitEnabled.value = false
+  bulkBaseRpm.value = null
+  bulkRpmStrategy.value = 'tiered'
+  bulkRpmStickyBuffer.value = null
+  userMsgQueueMode.value = null
+  smartProxyOptions.value = {
+    enabled: false,
+    proxy_count: 2,
+    test_latency: true,
+    prefer_low_latency: true,
+    low_latency_limit: 0,
+    weighted_by_load: true
+  }
+
+  showMixedChannelWarning.value = false
+  mixedChannelWarningMessage.value = ''
+  pendingUpdatesForConfirm.value = null
+  mixedChannelConfirmed.value = false
+}
+
+const hydrateBulkEditForm = (rawUpdates: Record<string, unknown> | null | undefined) => {
+  const updates = isRecord(rawUpdates) ? rawUpdates : {}
+  const credentials = isRecord(updates.credentials) ? updates.credentials : {}
+  const extra = isRecord(updates.extra) ? updates.extra : {}
+
+  if (hasOwn(updates, 'proxy_id')) {
+    enableProxy.value = true
+    const value = Number(updates.proxy_id)
+    proxyId.value = Number.isFinite(value) && value > 0 ? value : null
+  }
+  if (hasOwn(updates, 'concurrency')) {
+    enableConcurrency.value = true
+    concurrency.value = Math.max(1, Number(updates.concurrency) || 1)
+  }
+  if (hasOwn(updates, 'load_factor')) {
+    enableLoadFactor.value = true
+    const value = Number(updates.load_factor)
+    loadFactor.value = Number.isFinite(value) && value > 0 ? value : null
+  }
+  if (hasOwn(updates, 'priority')) {
+    enablePriority.value = true
+    priority.value = Number(updates.priority) || 1
+  }
+  if (hasOwn(updates, 'rate_multiplier')) {
+    enableRateMultiplier.value = true
+    rateMultiplier.value = Number(updates.rate_multiplier) || 1
+  }
+  if (hasOwn(updates, 'status')) {
+    enableStatus.value = true
+    status.value = updates.status === 'inactive' ? 'inactive' : 'active'
+  }
+  if (hasOwn(updates, 'group_ids')) {
+    enableGroups.value = true
+    groupIds.value = Array.isArray(updates.group_ids)
+      ? updates.group_ids.map(Number).filter(Number.isFinite)
+      : []
+  }
+  if (hasOwn(updates, 'upstream_billing_probe_enabled')) {
+    enableUpstreamBillingAutoProbe.value = true
+    upstreamBillingAutoProbeMode.value = updates.upstream_billing_probe_enabled === false
+      ? 'disabled'
+      : 'enabled'
+  }
+
+  if (hasOwn(credentials, 'base_url')) {
+    enableBaseUrl.value = true
+    baseUrl.value = typeof credentials.base_url === 'string' ? credentials.base_url : ''
+  }
+  if (hasOwn(credentials, 'model_mapping')) {
+    enableModelRestriction.value = true
+    const rawMapping = isRecord(credentials.model_mapping) ? credentials.model_mapping : {}
+    const parsed = splitModelMappingObject(rawMapping)
+    if (parsed.modelMappings.length === 0) {
+      modelRestrictionMode.value = 'whitelist'
+      allowedModels.value = parsed.allowedModels
+    } else {
+      modelRestrictionMode.value = 'mapping'
+      modelMappings.value = [
+        ...parsed.allowedModels.map((model) => ({ from: model, to: model })),
+        ...parsed.modelMappings
+      ]
+    }
+  }
+  if (hasOwn(credentials, 'custom_error_codes') || hasOwn(credentials, 'custom_error_codes_enabled')) {
+    enableCustomErrorCodes.value = true
+    selectedErrorCodes.value = Array.isArray(credentials.custom_error_codes)
+      ? credentials.custom_error_codes.map(Number).filter((code) => Number.isInteger(code))
+      : []
+  }
+  if (hasOwn(credentials, 'intercept_warmup_requests')) {
+    enableInterceptWarmup.value = true
+    interceptWarmupRequests.value = credentials.intercept_warmup_requests === true
+  }
+  if (hasOwn(credentials, HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY) || hasOwn(credentials, HEADER_OVERRIDES_CREDENTIAL_KEY)) {
+    enableHeaderOverride.value = true
+    headerOverrideEnabled.value = credentials[HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY] === true
+    headerOverrideRows.value = splitHeaderOverridesObject(credentials[HEADER_OVERRIDES_CREDENTIAL_KEY])
+  }
+  if (hasOwn(credentials, 'openai_capabilities')) {
+    enableOpenAIEndpointCapabilities.value = true
+    openAIEndpointCapabilities.value = Array.isArray(credentials.openai_capabilities)
+      ? normalizeOpenAIEndpointCapabilities(credentials.openai_capabilities as OpenAIEndpointCapability[])
+      : ['chat_completions', 'embeddings']
+  }
+  if (hasOwn(credentials, 'compact_model_mapping')) {
+    enableOpenAICompactModelMapping.value = true
+    const parsed = splitModelMappingObject(
+      isRecord(credentials.compact_model_mapping) ? credentials.compact_model_mapping : {}
+    )
+    openAICompactModelMappings.value = [
+      ...parsed.allowedModels.map((model) => ({ from: model, to: model })),
+      ...parsed.modelMappings
+    ]
+  }
+
+  if (hasOwn(extra, 'openai_passthrough')) {
+    enableOpenAIPassthrough.value = true
+    openaiPassthroughEnabled.value = extra.openai_passthrough === true
+  }
+  if (hasOwn(extra, 'openai_responses_flatten_namespaces')) {
+    enableOpenAIFlattenNamespaces.value = true
+    openaiFlattenNamespacesEnabled.value = extra.openai_responses_flatten_namespaces === true
+  }
+  if (hasOwn(extra, 'openai_long_context_billing_enabled')) {
+    enableOpenAILongContextBilling.value = true
+    openAILongContextBillingEnabled.value = extra.openai_long_context_billing_enabled === true
+  }
+  if (hasOwn(extra, 'openai_responses_mode')) {
+    enableOpenAIResponsesMode.value = true
+    const value = extra.openai_responses_mode
+    openAIResponsesMode.value = value === 'force_responses' || value === 'force_chat_completions'
+      ? value
+      : 'auto'
+  }
+  if (hasOwn(extra, 'openai_oauth_responses_websockets_v2_mode')) {
+    enableOpenAIWSMode.value = true
+    openaiOAuthResponsesWebSocketV2Mode.value = String(extra.openai_oauth_responses_websockets_v2_mode) as OpenAIWSMode
+  }
+  if (hasOwn(extra, 'openai_apikey_responses_websockets_v2_mode')) {
+    enableOpenAIAPIKeyWSMode.value = true
+    openaiAPIKeyResponsesWebSocketV2Mode.value = String(extra.openai_apikey_responses_websockets_v2_mode) as OpenAIWSMode
+  }
+  if (hasOwn(extra, 'codex_cli_only')) {
+    enableCodexCLIOnly.value = true
+    codexCLIOnlyEnabled.value = extra.codex_cli_only === true
+  }
+  if (hasOwn(extra, 'codex_cli_only_allow_app_server')) {
+    enableCodexCLIOnlyAppServer.value = true
+    codexCLIOnlyAppServerEnabled.value = extra.codex_cli_only_allow_app_server === true
+  }
+  if (hasOwn(extra, 'codex_fingerprint_mode')) {
+    enableCodexFingerprintMode.value = true
+    const value = extra.codex_fingerprint_mode
+    codexFingerprintMode.value = value === 'device' || value === 'session' || value === 'full'
+      ? value
+      : 'off'
+  }
+  if (hasOwn(extra, 'openai_compact_mode')) {
+    enableOpenAICompactMode.value = true
+    const value = extra.openai_compact_mode
+    openAICompactMode.value = value === 'force_on' || value === 'force_off' ? value : 'auto'
+  }
+  if (hasOwn(extra, 'base_rpm') || hasOwn(extra, 'rpm_strategy') || hasOwn(extra, 'rpm_sticky_buffer')) {
+    enableRpmLimit.value = true
+    const baseRpm = Number(extra.base_rpm)
+    rpmLimitEnabled.value = Number.isFinite(baseRpm) && baseRpm > 0
+    bulkBaseRpm.value = rpmLimitEnabled.value ? baseRpm : null
+    bulkRpmStrategy.value = extra.rpm_strategy === 'sticky_exempt' ? 'sticky_exempt' : 'tiered'
+    const buffer = Number(extra.rpm_sticky_buffer)
+    bulkRpmStickyBuffer.value = Number.isFinite(buffer) && buffer > 0 ? buffer : null
+  }
+  if (hasOwn(extra, 'user_msg_queue_mode')) {
+    userMsgQueueMode.value = typeof extra.user_msg_queue_mode === 'string'
+      ? extra.user_msg_queue_mode
+      : ''
+  }
+}
+
 watch(
   () => props.show,
   (newShow) => {
-    if (!newShow) {
-      // Reset all enable flags
-      enableBaseUrl.value = false
-      enableModelRestriction.value = false
-      enableCustomErrorCodes.value = false
-      enableInterceptWarmup.value = false
-      enableHeaderOverride.value = false
-      enableProxy.value = false
-      enableConcurrency.value = false
-      enableLoadFactor.value = false
-      enablePriority.value = false
-      enableRateMultiplier.value = false
-      enableStatus.value = false
-      enableGroups.value = false
-      enableOpenAIPassthrough.value = false
-      enableOpenAIFlattenNamespaces.value = false
-      enableOpenAILongContextBilling.value = false
-      enableOpenAIEndpointCapabilities.value = false
-      enableOpenAIResponsesMode.value = false
-      enableOpenAIWSMode.value = false
-      enableOpenAIAPIKeyWSMode.value = false
-      enableUpstreamBillingAutoProbe.value = false
-      enableCodexCLIOnly.value = false
-      enableCodexCLIOnlyAppServer.value = false
-      enableCodexFingerprintMode.value = false
-      codexFingerprintMode.value = 'off'
-      enableOpenAICompactMode.value = false
-      enableOpenAICompactModelMapping.value = false
-      enableRpmLimit.value = false
-
-      // Reset all values
-      baseUrl.value = ''
-      openaiPassthroughEnabled.value = false
-      openaiFlattenNamespacesEnabled.value = false
-      openAILongContextBillingEnabled.value = false
-      openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
-      openAIResponsesMode.value = 'auto'
-      modelRestrictionMode.value = 'whitelist'
-      allowedModels.value = []
-      modelMappings.value = []
-      selectedErrorCodes.value = []
-      customErrorCodeInput.value = null
-      interceptWarmupRequests.value = false
-      headerOverrideEnabled.value = false
-      headerOverrideRows.value = []
-      proxyId.value = null
-      concurrency.value = 1
-      loadFactor.value = null
-      priority.value = 1
-      rateMultiplier.value = 1
-      status.value = 'active'
-      groupIds.value = []
-      openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
-      openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
-      upstreamBillingAutoProbeMode.value = 'enabled'
-      codexCLIOnlyEnabled.value = false
-      codexCLIOnlyAppServerEnabled.value = false
-      openAICompactMode.value = 'auto'
-      openAICompactModelMappings.value = []
-      rpmLimitEnabled.value = false
-      bulkBaseRpm.value = null
-      bulkRpmStrategy.value = 'tiered'
-      bulkRpmStickyBuffer.value = null
-      userMsgQueueMode.value = null
-
-      // Reset mixed channel warning state
-      showMixedChannelWarning.value = false
-      mixedChannelWarningMessage.value = ''
-      pendingUpdatesForConfirm.value = null
-      mixedChannelConfirmed.value = false
-    }
-  }
+    resetBulkEditForm()
+    if (!newShow) return
+    configProfileName.value = props.profileName
+    smartProxyOptions.value = { ...props.initialSmartProxyOptions }
+    hydrateBulkEditForm(props.initialUpdates)
+  },
+  { immediate: true }
 )
 </script>
