@@ -490,10 +490,16 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		return nil, infraerrors.BadRequest("INVALID_CODEX_HARVEST_PROXY", err.Error())
 	}
 	updates[SettingKeyOpenAICodexTicketHarvestProxyURL] = strings.TrimSpace(settings.OpenAICodexTicketHarvestProxyURL)
+	if settings.OpenAICodexTicketMissRetrySeconds <= 0 {
+		settings.OpenAICodexTicketMissRetrySeconds = openAICodexTicketDefaultMissRetrySeconds
+	}
 	if err := ValidateOpenAICodexTicketMissRetrySeconds(settings.OpenAICodexTicketMissRetrySeconds); err != nil {
 		return nil, infraerrors.BadRequest("INVALID_CODEX_TICKET_MISS_RETRY_SECONDS", err.Error())
 	}
 	updates[SettingKeyOpenAICodexTicketMissRetrySeconds] = strconv.Itoa(settings.OpenAICodexTicketMissRetrySeconds)
+	if settings.OpenAICodexTicketRateLimitRetrySeconds <= 0 {
+		settings.OpenAICodexTicketRateLimitRetrySeconds = openAICodexTicketDefaultRateLimitRetrySeconds
+	}
 	if err := ValidateOpenAICodexTicketRateLimitRetrySeconds(settings.OpenAICodexTicketRateLimitRetrySeconds); err != nil {
 		return nil, infraerrors.BadRequest("INVALID_CODEX_TICKET_RATE_LIMIT_RETRY_SECONDS", err.Error())
 	}

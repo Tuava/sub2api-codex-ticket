@@ -900,6 +900,12 @@ func TestAPIContracts(t *testing.T) {
 					"openai_codex_ticket_enabled": false,
 					"openai_codex_ticket_harvest_proxy_url": "",
 					"openai_codex_ticket_harvest_proxy_configured": false,
+						"openai_codex_ticket_miss_retry_seconds": 1800,
+						"openai_codex_ticket_rate_limit_retry_seconds": 3600,
+						"openai_codex_ticket_model_policies": {
+							"gpt-6-astra": {"enabled": true, "target_mode": "auto", "target_length": 332, "missing_policy": "allow"},
+							"gpt-5.6-sol": {"enabled": true, "target_mode": "auto", "target_length": 332, "missing_policy": "allow"}
+						},
 					"min_codex_version": "",
 					"max_codex_version": "",
 					"codex_cli_only_blacklist": "",
@@ -1232,6 +1238,12 @@ func TestAPIContracts(t *testing.T) {
 					"openai_codex_ticket_enabled": false,
 					"openai_codex_ticket_harvest_proxy_url": "",
 					"openai_codex_ticket_harvest_proxy_configured": false,
+						"openai_codex_ticket_miss_retry_seconds": 1800,
+						"openai_codex_ticket_rate_limit_retry_seconds": 3600,
+						"openai_codex_ticket_model_policies": {
+							"gpt-6-astra": {"enabled": true, "target_mode": "auto", "target_length": 332, "missing_policy": "allow"},
+							"gpt-5.6-sol": {"enabled": true, "target_mode": "auto", "target_length": 332, "missing_policy": "allow"}
+						},
 					"min_codex_version": "",
 					"max_codex_version": "",
 					"codex_cli_only_blacklist": "",
