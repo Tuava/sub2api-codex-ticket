@@ -67,6 +67,7 @@ const setInputFiles = (element: Element, files: File[]) => {
 
 describe('ImportDataModal', () => {
   beforeEach(async () => {
+    localStorage.clear()
     showError.mockReset()
     showSuccess.mockReset()
     showWarning.mockReset()
@@ -85,7 +86,7 @@ describe('ImportDataModal', () => {
     const { adminAPI } = await import('@/api/admin')
     const wrapper = mountModal()
 
-    const input = wrapper.find('input[type="file"]')
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
     setInputFiles(input.element, [makeJsonFile('data.json', 'invalid json')])
 
     await input.trigger('change')
@@ -100,7 +101,7 @@ describe('ImportDataModal', () => {
     const { adminAPI } = await import('@/api/admin')
     const wrapper = mountModal()
 
-    const input = wrapper.find('input[type="file"]')
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
     setInputFiles(input.element, [makeJsonFile('random.json', JSON.stringify({ name: 'test' }))])
 
     await input.trigger('change')
@@ -122,7 +123,7 @@ describe('ImportDataModal', () => {
     })
 
     const wrapper = mountModal()
-    const input = wrapper.find('input[type="file"]')
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
 
     const valid = makeJsonFile(
       'valid.json',
@@ -158,7 +159,7 @@ describe('ImportDataModal', () => {
 
     const wrapper = mountModal()
 
-    const input = wrapper.find('input[type="file"]')
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
     const first = makeJsonFile(
       'first.json',
       JSON.stringify({ exported_at: '2026-07-05T00:00:00Z', proxies: [], accounts: [{ name: 'a' }] })
@@ -201,7 +202,7 @@ describe('ImportDataModal', () => {
     const wrapper = mountModal()
     await wrapper.get('[data-testid="smart-proxy-enabled"]').setValue(true)
     await wrapper.get('[data-testid="smart-proxy-count"]').setValue(3)
-    const input = wrapper.find('input[type="file"]')
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
     setInputFiles(input.element, [makeJsonFile(
       'data.json',
       JSON.stringify({ exported_at: '2026-07-05T00:00:00Z', proxies: [], accounts: [{ name: 'a' }] })
@@ -234,7 +235,7 @@ describe('ImportDataModal', () => {
       post_import_failed: 0
     })
     const wrapper = mountModal()
-    const input = wrapper.find('input[type="file"]')
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
     setInputFiles(input.element, [makeJsonFile(
       'data.json',
       JSON.stringify({
@@ -265,6 +266,84 @@ describe('ImportDataModal', () => {
     }))
   })
 
+  it('可保存多套导入配置并一键切换', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 1,
+      account_failed: 0,
+      post_import_updated: 1,
+      post_import_failed: 0
+    })
+    const wrapper = mountModal()
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
+    setInputFiles(input.element, [makeJsonFile(
+      'data.json',
+      JSON.stringify({
+        exported_at: '2026-07-05T00:00:00Z',
+        proxies: [],
+        accounts: [{ name: 'a', platform: 'openai', type: 'apikey' }]
+      })
+    )])
+    await input.trigger('change')
+    await flushPromises()
+
+    const configure = async (concurrency: number, name: string) => {
+      await wrapper.get('[data-testid="open-import-bulk-config"]').trigger('click')
+      await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+      await wrapper.get('#bulk-edit-concurrency').setValue(concurrency)
+      await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+      await wrapper.get('[data-testid="import-profile-name"]').setValue(name)
+      await wrapper.get('[data-testid="save-import-profile"]').trigger('click')
+    }
+
+    await configure(4, '低并发')
+    await configure(12, '高并发')
+    expect(wrapper.findAll('[data-testid^="import-profile-"]').filter(
+      (node) => node.attributes('data-testid') !== 'import-profile-list' && node.attributes('data-testid') !== 'import-profile-name'
+    )).toHaveLength(2)
+
+    const lowProfile = wrapper.findAll('[data-testid^="import-profile-"]').find(
+      (button) => button.text() === '低并发'
+    )
+    expect(lowProfile).toBeDefined()
+    await lowProfile!.trigger('click')
+    await wrapper.get('#import-data-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith(expect.objectContaining({
+      post_import_updates: { concurrency: 4 }
+    }))
+    const stored = JSON.parse(localStorage.getItem('sub2api:admin:account-import-profiles:v1') || '[]')
+    expect(stored.map((profile: { name: string }) => profile.name)).toEqual(['低并发', '高并发'])
+  })
+
+  it('重新打开弹窗后仍可读取已保存方案', async () => {
+    localStorage.setItem('sub2api:admin:account-import-profiles:v1', JSON.stringify([{
+      id: 'saved-profile',
+      name: '常用方案',
+      post_import_updates: { priority: 8 },
+      smart_proxy_assignment: {
+        enabled: false,
+        proxy_count: 2,
+        test_latency: true,
+        prefer_low_latency: true,
+        low_latency_limit: 0,
+        weighted_by_load: true
+      },
+      platforms: ['openai'],
+      account_types: ['apikey'],
+      updated_at: '2026-09-19T00:00:00Z'
+    }]))
+    const wrapper = mountModal()
+    expect(wrapper.text()).toContain('常用方案')
+    await wrapper.get('[data-testid="import-profile-saved-profile"]').trigger('click')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="import-profile-name"]').element.value).toBe('常用方案')
+  })
+
   it('部分成功时关闭弹窗仍通知父组件刷新', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
@@ -276,7 +355,7 @@ describe('ImportDataModal', () => {
     })
 
     const wrapper = mountModal()
-    const input = wrapper.find('input[type="file"]')
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
     setInputFiles(input.element, [
       makeJsonFile(
         'mixed.json',
