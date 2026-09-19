@@ -81,6 +81,9 @@ func (r *codexTicketLifecycleRepo) ListByPlatform(ctx context.Context, _ string)
 	}
 	return []Account{r.account}, nil
 }
+func (r *codexTicketLifecycleRepo) ListSchedulableByPlatform(ctx context.Context, _ string) ([]Account, error) {
+	return r.ListByPlatform(ctx, PlatformOpenAI)
+}
 func (r *codexTicketLifecycleRepo) UpdateExtra(ctx context.Context, _ int64, _ map[string]any) error {
 	if r.persist != nil {
 		return r.persist(ctx)

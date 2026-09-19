@@ -174,6 +174,15 @@
         <ChevronDoubleRightIcon v-else class="h-5 w-5 flex-shrink-0" />
         <span class="sidebar-label" :class="{ 'sidebar-label-collapsed': sidebarCollapsed }" :aria-hidden="sidebarCollapsed ? 'true' : 'false'">{{ t('nav.collapse') }}</span>
       </button>
+
+      <div
+        v-if="isAdmin"
+        class="mt-3 border-t border-gray-100 pt-3 text-center text-[11px] leading-4 text-gray-400 dark:border-dark-800 dark:text-dark-500"
+        data-testid="admin-copyright"
+      >
+        <span v-if="!sidebarCollapsed">© {{ copyrightYear }} 2679373771</span>
+        <span v-else :title="`© ${copyrightYear} 2679373771`" aria-label="Copyright 2679373771">©</span>
+      </div>
     </div>
   </aside>
 
@@ -265,6 +274,7 @@ const siteName = computed(() => appStore.siteName)
 const siteLogo = computed(() => sanitizeUrl(appStore.siteLogo || '', { allowRelative: true, allowDataUrl: true }))
 const siteVersion = computed(() => appStore.siteVersion)
 const settingsLoaded = computed(() => appStore.publicSettingsLoaded)
+const copyrightYear = new Date().getFullYear()
 
 // SVG Icon Components
 const DashboardIcon = {

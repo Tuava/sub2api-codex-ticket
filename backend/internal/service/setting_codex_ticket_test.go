@@ -93,6 +93,24 @@ func TestCodexTicketProxyRuntimeSettingAndFallback(t *testing.T) {
 	require.Equal(t, "https://third.example.com:443", svc.openAICodexTicketHarvestProxyURL())
 }
 
+func TestCodexTicketRetryPolicyRuntimeSettingsAndFallback(t *testing.T) {
+	repo := &codexTicketSettingRepo{codexPolicyMigrationRepoStub: &codexPolicyMigrationRepoStub{values: map[string]string{}}}
+	settings := NewSettingService(repo, &config.Config{})
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{}, nil)
+	svc.settingService = settings
+
+	miss, rateLimited := svc.openAICodexTicketRetryIntervals(context.Background())
+	require.Equal(t, 30*time.Minute, miss)
+	require.Equal(t, time.Hour, rateLimited)
+
+	repo.values[SettingKeyOpenAICodexTicketMissRetrySeconds] = "600"
+	repo.values[SettingKeyOpenAICodexTicketRateLimitRetrySeconds] = "7200"
+	settings.InvalidateOpenAICodexTicketRetryPolicyCache()
+	miss, rateLimited = svc.openAICodexTicketRetryIntervals(context.Background())
+	require.Equal(t, 10*time.Minute, miss)
+	require.Equal(t, 2*time.Hour, rateLimited)
+}
+
 func TestCodexTicketProxyMaskAndValidation(t *testing.T) {
 	for _, raw := range []string{"http://user:secret@proxy.example.com:8080", "socks5h://user:secret@proxy.example.com:1080", "https://user:secret@[::1]:443"} {
 		require.NoError(t, ValidateOpenAICodexTicketHarvestProxyURL(raw))

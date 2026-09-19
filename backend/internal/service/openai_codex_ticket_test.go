@@ -26,6 +26,7 @@ func ticketTestAccount(id int64) *Account {
 		ID:          id,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
+		Schedulable: true,
 		Credentials: map[string]any{"access_token": "tok", "chatgpt_account_id": "acc-1"},
 	}
 }
@@ -279,6 +280,83 @@ func TestHarvestOpenAICodexTicket_HTTP503DoesNotAbortHunt(t *testing.T) {
 	require.Len(t, upstream.requests, 2)
 }
 
+func TestCaptureOpenAICodexTicketFromUpstreamPersistsTargetState(t *testing.T) {
+	account := ticketTestAccount(41)
+	account.Extra = map[string]any{}
+	repo := &codexTicketRefreshRepo{}
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+		Enabled:              true,
+		TargetLength:         292,
+		TTLSeconds:           3600,
+		RefreshBeforeSeconds: 600,
+	}, nil)
+	svc.accountRepo = repo
+	request, err := http.NewRequest(http.MethodPost, "https://upstream.example/responses", strings.NewReader(`{"model":"gpt-6-astra"}`))
+	require.NoError(t, err)
+	require.Equal(t, "gpt-6-astra", openAICodexTicketModelFromRequest(request))
+	require.True(t, isOpenAICodexTicketAccount(account))
+	require.True(t, svc.openAICodexTicketEnabled())
+	require.True(t, svc.openAICodexTicketGatedModel("gpt-6-astra"))
+	require.Equal(t, 292, resolveOpenAICodexTicketPolicy(account, svc.openAICodexTicketConfig()).TargetLength)
+	responseHeader := http.Header{}
+	responseHeader.Set(openAICodexTurnStateHeader, fakeCodexTicketState(292))
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     responseHeader,
+		Body:       io.NopCloser(strings.NewReader("data: {}\n\n")),
+	}
+	state := extractOpenAICodexTurnState(response.Header)
+	require.Len(t, state, 292)
+	require.True(t, strings.HasPrefix(state, openAICodexTicketStatePrefix))
+
+	svc.captureOpenAICodexTicketFromUpstream(request, account, response)
+
+	ticket := svc.lookupOpenAICodexTicket(account, "gpt-6-astra")
+	require.NotNil(t, ticket)
+	require.Equal(t, 292, ticket.Length)
+	require.Contains(t, repo.updates, openAICodexTicketExtraKey("gpt-6-astra"))
+	require.Contains(t, repo.updates, openAICodexTicketObservationExtraKey("gpt-6-astra"))
+}
+
+func TestCaptureOpenAICodexTicketFromUpstreamKeepsFreshTargetState(t *testing.T) {
+	state := fakeCodexTicketState(292)
+	account := ticketTestAccount(41)
+	account.Extra = map[string]any{}
+	repo := &codexTicketRefreshRepo{}
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+		Enabled:              true,
+		TargetLength:         292,
+		TTLSeconds:           3600,
+		RefreshBeforeSeconds: 600,
+	}, nil)
+	svc.accountRepo = repo
+	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
+		AccountID:  account.ID,
+		Model:      "gpt-6-astra",
+		State:      state,
+		Length:     292,
+		CapturedAt: time.Now(),
+		ExpiresAt:  time.Now().Add(time.Hour),
+	})
+	repo.updates = nil
+	request, err := http.NewRequest(http.MethodPost, "https://upstream.example/responses", strings.NewReader(`{"model":"gpt-6-astra"}`))
+	require.NoError(t, err)
+	responseHeader := http.Header{}
+	responseHeader.Set(openAICodexTurnStateHeader, fakeCodexTicketState(312))
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     responseHeader,
+		Body:       io.NopCloser(strings.NewReader("data: {}\n\n")),
+	}
+
+	svc.captureOpenAICodexTicketFromUpstream(request, account, response)
+
+	ticket := svc.lookupOpenAICodexTicket(account, "gpt-6-astra")
+	require.NotNil(t, ticket)
+	require.Equal(t, state, ticket.State)
+	require.Nil(t, repo.updates)
+}
+
 func TestLookupOpenAICodexTicket_HydratesFromExtra(t *testing.T) {
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: true, TargetLength: 292, TTLSeconds: 3600}, nil)
 	state := fakeCodexTicketState(292)
@@ -337,6 +415,9 @@ type codexTicketRefreshRepo struct {
 func (r *codexTicketRefreshRepo) ListByPlatform(context.Context, string) ([]Account, error) {
 	return r.accounts, nil
 }
+func (r *codexTicketRefreshRepo) ListSchedulableByPlatform(context.Context, string) ([]Account, error) {
+	return r.accounts, nil
+}
 func (r *codexTicketRefreshRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -376,18 +457,184 @@ func TestRefreshOpenAICodexTickets_ConcurrentModelsPreserveAccountSnapshot(t *te
 	upstream := &codexTicketConcurrentUpstream{ready: make(chan struct{})}
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: true, HarvestProxyURL: "socks5h://proxy.example.com:1080"}, upstream)
 	svc.accountRepo = repo
-	svc.refreshOpenAICodexTickets(context.Background())
+	require.True(t, svc.refreshOpenAICodexTickets(context.Background()), "missing tickets should be probed once")
 	require.Equal(t, int64(2), upstream.started.Load())
 	require.Equal(t, map[string]any{"existing": true}, account.Extra)
-	require.Len(t, repo.updates, 2)
+	require.Len(t, repo.updates, 4)
 	for _, model := range []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel} {
 		ticket := svc.lookupOpenAICodexTicket(account, model)
 		require.NotNil(t, ticket)
 		require.True(t, ticket.valid(time.Now(), 292))
 	}
 	// Valid tickets do not produce another probe on the next cycle.
-	svc.refreshOpenAICodexTickets(context.Background())
+	require.False(t, svc.refreshOpenAICodexTickets(context.Background()), "valid tickets should not be probed again")
 	require.Equal(t, int64(2), upstream.started.Load())
+}
+
+func TestRefreshOpenAICodexTickets_SkipsUnschedulableAccounts(t *testing.T) {
+	active := ticketTestAccount(41)
+	active.Status = StatusActive
+	paused := ticketTestAccount(42)
+	paused.Status = StatusActive
+	paused.Schedulable = false
+	rateLimitedUntil := time.Now().Add(time.Hour)
+	rateLimited := ticketTestAccount(43)
+	rateLimited.Status = StatusActive
+	rateLimited.RateLimitResetAt = &rateLimitedUntil
+	repo := &codexTicketRefreshRepo{accounts: []Account{*active, *paused, *rateLimited}}
+	upstream := &codexTicketConcurrentUpstream{ready: make(chan struct{})}
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: true, HarvestProxyURL: "socks5h://proxy.example.com:1080"}, upstream)
+	svc.accountRepo = repo
+
+	require.True(t, svc.refreshOpenAICodexTickets(context.Background()))
+
+	require.Equal(t, int64(2), upstream.started.Load(), "only the schedulable account's two models should be probed")
+}
+
+func TestRefreshOpenAICodexTickets_HonorsRateLimitNextProbeAt(t *testing.T) {
+	now := time.Now()
+	account := ticketTestAccount(41)
+	account.Status = StatusActive
+	account.Extra = map[string]any{
+		openAICodexTicketObservationExtraKey("gpt-6-astra"): openAICodexTicketObservation{
+			Model:        "gpt-6-astra",
+			TargetLength: 292,
+			Outcome:      "rate_limited",
+			HTTPStatus:   http.StatusTooManyRequests,
+			ObservedAt:   now,
+			NextProbeAt:  now.Add(time.Hour),
+		},
+	}
+	repo := &codexTicketRefreshRepo{accounts: []Account{*account}}
+	upstream := &codexTicketConcurrentUpstream{ready: make(chan struct{})}
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+		Enabled: true, Models: []string{"gpt-6-astra"}, HarvestProxyURL: "socks5h://proxy.example.com:1080",
+	}, upstream)
+	svc.accountRepo = repo
+
+	require.False(t, svc.refreshOpenAICodexTickets(context.Background()), "a future NextProbeAt must suppress the probe")
+	require.Zero(t, upstream.started.Load())
+
+	repo.accounts[0].Extra[openAICodexTicketObservationExtraKey("gpt-6-astra")] = openAICodexTicketObservation{
+		Model:        "gpt-6-astra",
+		TargetLength: 292,
+		Outcome:      "rate_limited",
+		HTTPStatus:   http.StatusTooManyRequests,
+		ObservedAt:   now.Add(-time.Hour),
+		NextProbeAt:  now.Add(-time.Minute),
+	}
+	require.True(t, svc.refreshOpenAICodexTickets(context.Background()))
+	require.Equal(t, int64(1), upstream.started.Load())
+}
+
+func TestOpenAICodexTicketRateLimitRetryAtWaitsForQuotaReset(t *testing.T) {
+	now := time.Now()
+	resetAt := now.Add(6 * time.Hour)
+	account := ticketTestAccount(41)
+	account.Extra = map[string]any{
+		"codex_7d_used_percent": 100.0,
+		"codex_7d_reset_at":     resetAt.Format(time.RFC3339Nano),
+	}
+	require.True(t, resetAt.Equal(openAICodexTicketRateLimitRetryAt(account, now, time.Hour)))
+
+	account.Extra = map[string]any{"codex_7d_used_percent": 42.0}
+	require.WithinDuration(t, now.Add(time.Hour), openAICodexTicketRateLimitRetryAt(account, now, time.Hour), time.Second)
+}
+
+func TestResolveOpenAICodexTicketPolicy_AutoAndManual(t *testing.T) {
+	cfg := config.OpenAICodexTicketConfig{TargetLength: 292, FailClosed: true}
+	business := ticketTestAccount(1)
+	business.Credentials["plan_type"] = "self_serve_business_prolite"
+	policy := resolveOpenAICodexTicketPolicy(business, cfg)
+	require.Equal(t, 332, policy.TargetLength)
+	require.Equal(t, "auto_business", policy.TargetSource)
+	require.Equal(t, "pause", policy.MissingPolicy)
+
+	personal := ticketTestAccount(2)
+	personal.Credentials["plan_type"] = "pro"
+	policy = resolveOpenAICodexTicketPolicy(personal, cfg)
+	require.Equal(t, 292, policy.TargetLength)
+	require.Equal(t, "auto_personal", policy.TargetSource)
+
+	personal.Extra = map[string]any{
+		OpenAICodexTicketTargetModeExtraKey:    "manual",
+		OpenAICodexTicketTargetLengthExtraKey:  356,
+		OpenAICodexTicketMissingPolicyExtraKey: "allow",
+	}
+	policy = resolveOpenAICodexTicketPolicy(personal, cfg)
+	require.Equal(t, 356, policy.TargetLength)
+	require.Equal(t, "manual", policy.TargetSource)
+	require.Equal(t, "allow", policy.MissingPolicy)
+
+	policy = resolveOpenAICodexTicketPolicy(ticketTestAccount(3), config.OpenAICodexTicketConfig{TargetLength: 292})
+	require.Equal(t, "allow", policy.MissingPolicy, "missing tickets must keep scheduling by default")
+}
+
+func TestNormalizeOpenAICodexTicketPolicyExtra(t *testing.T) {
+	extra, err := NormalizeOpenAICodexTicketPolicyExtra(PlatformOpenAI, AccountTypeOAuth, map[string]any{
+		OpenAICodexTicketTargetModeExtraKey:    "manual",
+		OpenAICodexTicketTargetLengthExtraKey:  332.0,
+		OpenAICodexTicketMissingPolicyExtraKey: "allow",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 332, extra[OpenAICodexTicketTargetLengthExtraKey])
+
+	extra, err = NormalizeOpenAICodexTicketPolicyExtra(PlatformOpenAI, AccountTypeOAuth, map[string]any{
+		OpenAICodexTicketTargetModeExtraKey: "auto",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "allow", extra[OpenAICodexTicketMissingPolicyExtraKey])
+
+	_, err = NormalizeOpenAICodexTicketPolicyExtra(PlatformOpenAI, AccountTypeOAuth, map[string]any{
+		OpenAICodexTicketTargetModeExtraKey:   "manual",
+		OpenAICodexTicketTargetLengthExtraKey: 0,
+	})
+	require.Error(t, err)
+}
+
+func TestOpenAICodexTicketStatuses_UsesAccountPolicyAndObservation(t *testing.T) {
+	now := time.Now()
+	account := ticketTestAccount(41)
+	account.Credentials["plan_type"] = "team"
+	account.Extra = map[string]any{
+		OpenAICodexTicketMissingPolicyExtraKey: "allow",
+		openAICodexTicketObservationExtraKey("gpt-6-astra"): map[string]any{
+			"model": "gpt-6-astra", "target_length": 332, "length": 356,
+			"http_status": 200, "outcome": "non_target", "observed_at": now,
+		},
+	}
+	status := OpenAICodexTicketStatuses(account, config.OpenAICodexTicketConfig{
+		Enabled: true, FailClosed: true, Models: []string{"gpt-6-astra"},
+	}, now)
+	require.Len(t, status, 1)
+	require.Equal(t, 332, status[0].TargetLength)
+	require.Equal(t, 356, status[0].ObservedLength)
+	require.Equal(t, "non_target", status[0].TicketType)
+	require.False(t, status[0].Blocked)
+}
+
+func TestOpenAICodexTicketStatuses_ExpiredTicketUsesLatestObservedLength(t *testing.T) {
+	now := time.Now()
+	account := ticketTestAccount(41)
+	account.Credentials["plan_type"] = "team"
+	account.Extra = map[string]any{
+		openAICodexTicketExtraKey("gpt-6-astra"): map[string]any{
+			"model": "gpt-6-astra", "state": fakeCodexTicketState(332), "length": 332,
+			"captured_at": now.Add(-2 * time.Hour), "expires_at": now.Add(-time.Hour),
+		},
+		openAICodexTicketObservationExtraKey("gpt-6-astra"): map[string]any{
+			"model": "gpt-6-astra", "target_length": 332, "length": 356,
+			"http_status": 200, "outcome": "non_target", "observed_at": now,
+		},
+	}
+	status := OpenAICodexTicketStatuses(account, config.OpenAICodexTicketConfig{
+		Enabled: true, Models: []string{"gpt-6-astra"},
+	}, now)
+	require.Len(t, status, 1)
+	require.False(t, status[0].Ready)
+	require.Equal(t, "non_target", status[0].TicketType)
+	require.Zero(t, status[0].Length, "expired persisted ticket must not be reported as the current valid length")
+	require.Equal(t, 356, status[0].ObservedLength)
 }
 func TestOpenAICodexTicketStatuses_RespectRuntimeConfiguration(t *testing.T) {
 	account := ticketTestAccount(41)

@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"golang.org/x/sync/singleflight"
@@ -402,6 +404,172 @@ func (s *SettingService) InvalidateOpenAICodexTicketHarvestProxyCache() {
 	}
 	s.openAICodexTicketHarvestProxySF.Forget(SettingKeyOpenAICodexTicketHarvestProxyURL)
 	s.openAICodexTicketHarvestProxyCache.Store(&cachedOpenAICodexTicketHarvestProxy{expiresAt: 0})
+}
+
+type cachedOpenAICodexTicketRetryPolicy struct {
+	missRetrySeconds      int
+	rateLimitRetrySeconds int
+	expiresAt             int64
+}
+
+const openAICodexTicketRetryPolicyCacheTTL = 5 * time.Second
+
+// OpenAICodexTicketRetryPolicy is the runtime view of the two harvesting
+// retry intervals configured on the gateway settings page.
+type OpenAICodexTicketRetryPolicy struct {
+	MissRetrySeconds      int
+	RateLimitRetrySeconds int
+}
+
+func (s *SettingService) GetOpenAICodexTicketRetryPolicy(ctx context.Context, missFallbackSeconds, rateLimitFallbackSeconds int) OpenAICodexTicketRetryPolicy {
+	fallback := OpenAICodexTicketRetryPolicy{
+		MissRetrySeconds:      missFallbackSeconds,
+		RateLimitRetrySeconds: rateLimitFallbackSeconds,
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil || s == nil || s.settingRepo == nil {
+		return fallback
+	}
+	if cached, ok := s.openAICodexTicketRetryPolicyCache.Load().(*cachedOpenAICodexTicketRetryPolicy); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return OpenAICodexTicketRetryPolicy{
+				MissRetrySeconds:      cached.missRetrySeconds,
+				RateLimitRetrySeconds: cached.rateLimitRetrySeconds,
+			}
+		}
+	}
+	resultCh := s.openAICodexTicketRetryPolicySF.DoChan(SettingKeyOpenAICodexTicketMissRetrySeconds, func() (any, error) {
+		if cached, ok := s.openAICodexTicketRetryPolicyCache.Load().(*cachedOpenAICodexTicketRetryPolicy); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return *cached, nil
+			}
+		}
+		dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		missValue, missErr := s.settingRepo.GetValue(dbCtx, SettingKeyOpenAICodexTicketMissRetrySeconds)
+		rateLimitValue, rateLimitErr := s.settingRepo.GetValue(dbCtx, SettingKeyOpenAICodexTicketRateLimitRetrySeconds)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if missErr != nil && !errors.Is(missErr, ErrSettingNotFound) {
+			if cached, ok := s.openAICodexTicketRetryPolicyCache.Load().(*cachedOpenAICodexTicketRetryPolicy); ok && cached != nil {
+				return *cached, nil
+			}
+			return fallback, nil
+		}
+		if rateLimitErr != nil && !errors.Is(rateLimitErr, ErrSettingNotFound) {
+			if cached, ok := s.openAICodexTicketRetryPolicyCache.Load().(*cachedOpenAICodexTicketRetryPolicy); ok && cached != nil {
+				return *cached, nil
+			}
+			return fallback, nil
+		}
+		policy := OpenAICodexTicketRetryPolicy{
+			MissRetrySeconds: parseOpenAICodexTicketRetrySeconds(
+				missValue,
+				fallback.MissRetrySeconds,
+				openAICodexTicketMinMissRetrySeconds,
+				openAICodexTicketMaxMissRetrySeconds,
+			),
+			RateLimitRetrySeconds: parseOpenAICodexTicketRetrySeconds(
+				rateLimitValue,
+				fallback.RateLimitRetrySeconds,
+				openAICodexTicketMinRateLimitRetrySeconds,
+				openAICodexTicketMaxRateLimitRetrySeconds,
+			),
+		}
+		cached := &cachedOpenAICodexTicketRetryPolicy{
+			missRetrySeconds:      policy.MissRetrySeconds,
+			rateLimitRetrySeconds: policy.RateLimitRetrySeconds,
+			expiresAt:             time.Now().Add(openAICodexTicketRetryPolicyCacheTTL).UnixNano(),
+		}
+		s.openAICodexTicketRetryPolicyCache.Store(cached)
+		return *cached, nil
+	})
+	select {
+	case <-ctx.Done():
+		return fallback
+	case result := <-resultCh:
+		switch value := result.Val.(type) {
+		case cachedOpenAICodexTicketRetryPolicy:
+			return OpenAICodexTicketRetryPolicy{
+				MissRetrySeconds:      value.missRetrySeconds,
+				RateLimitRetrySeconds: value.rateLimitRetrySeconds,
+			}
+		case OpenAICodexTicketRetryPolicy:
+			return value
+		default:
+			return fallback
+		}
+	}
+}
+
+func (s *SettingService) InvalidateOpenAICodexTicketRetryPolicyCache() {
+	if s == nil {
+		return
+	}
+	s.openAICodexTicketRetryPolicySF.Forget(SettingKeyOpenAICodexTicketMissRetrySeconds)
+	s.openAICodexTicketRetryPolicyCache.Store(&cachedOpenAICodexTicketRetryPolicy{expiresAt: 0})
+}
+
+type cachedOpenAICodexTicketModelPolicies struct {
+	value     map[string]config.OpenAICodexTicketModelPolicy
+	expiresAt int64
+}
+
+const openAICodexTicketModelPoliciesCacheTTL = 5 * time.Second
+
+func (s *SettingService) GetOpenAICodexTicketModelPolicies(ctx context.Context, fallback map[string]config.OpenAICodexTicketModelPolicy) map[string]config.OpenAICodexTicketModelPolicy {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s == nil || s.settingRepo == nil {
+		return fallback
+	}
+	if cached, ok := s.openAICodexTicketModelPoliciesCache.Load().(*cachedOpenAICodexTicketModelPolicies); ok && cached != nil && time.Now().UnixNano() < cached.expiresAt {
+		return maps.Clone(cached.value)
+	}
+	resultCh := s.openAICodexTicketModelPoliciesSF.DoChan(SettingKeyOpenAICodexTicketModelPolicies, func() (any, error) {
+		if cached, ok := s.openAICodexTicketModelPoliciesCache.Load().(*cachedOpenAICodexTicketModelPolicies); ok && cached != nil && time.Now().UnixNano() < cached.expiresAt {
+			return cached.value, nil
+		}
+		dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		raw, err := s.settingRepo.GetValue(dbCtx, SettingKeyOpenAICodexTicketModelPolicies)
+		if err != nil {
+			return fallback, nil
+		}
+		var parsed map[string]config.OpenAICodexTicketModelPolicy
+		if json.Unmarshal([]byte(raw), &parsed) != nil {
+			return fallback, nil
+		}
+		normalized, normalizeErr := NormalizeOpenAICodexTicketModelPolicies(parsed)
+		if normalizeErr != nil {
+			return fallback, nil
+		}
+		s.openAICodexTicketModelPoliciesCache.Store(&cachedOpenAICodexTicketModelPolicies{
+			value: normalized, expiresAt: time.Now().Add(openAICodexTicketModelPoliciesCacheTTL).UnixNano(),
+		})
+		return normalized, nil
+	})
+	select {
+	case <-ctx.Done():
+		return fallback
+	case result := <-resultCh:
+		if value, ok := result.Val.(map[string]config.OpenAICodexTicketModelPolicy); ok && result.Err == nil {
+			return maps.Clone(value)
+		}
+		return fallback
+	}
+}
+
+func (s *SettingService) InvalidateOpenAICodexTicketModelPoliciesCache() {
+	if s == nil {
+		return
+	}
+	s.openAICodexTicketModelPoliciesSF.Forget(SettingKeyOpenAICodexTicketModelPolicies)
+	s.openAICodexTicketModelPoliciesCache.Store(&cachedOpenAICodexTicketModelPolicies{expiresAt: 0})
 }
 
 // GetOpenAICodexUserAgent 返回 OpenAI Codex 上游请求使用的 User-Agent。

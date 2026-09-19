@@ -490,6 +490,23 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		return nil, infraerrors.BadRequest("INVALID_CODEX_HARVEST_PROXY", err.Error())
 	}
 	updates[SettingKeyOpenAICodexTicketHarvestProxyURL] = strings.TrimSpace(settings.OpenAICodexTicketHarvestProxyURL)
+	if err := ValidateOpenAICodexTicketMissRetrySeconds(settings.OpenAICodexTicketMissRetrySeconds); err != nil {
+		return nil, infraerrors.BadRequest("INVALID_CODEX_TICKET_MISS_RETRY_SECONDS", err.Error())
+	}
+	updates[SettingKeyOpenAICodexTicketMissRetrySeconds] = strconv.Itoa(settings.OpenAICodexTicketMissRetrySeconds)
+	if err := ValidateOpenAICodexTicketRateLimitRetrySeconds(settings.OpenAICodexTicketRateLimitRetrySeconds); err != nil {
+		return nil, infraerrors.BadRequest("INVALID_CODEX_TICKET_RATE_LIMIT_RETRY_SECONDS", err.Error())
+	}
+	updates[SettingKeyOpenAICodexTicketRateLimitRetrySeconds] = strconv.Itoa(settings.OpenAICodexTicketRateLimitRetrySeconds)
+	modelPolicies, err := NormalizeOpenAICodexTicketModelPolicies(settings.OpenAICodexTicketModelPolicies)
+	if err != nil {
+		return nil, infraerrors.BadRequest("INVALID_CODEX_TICKET_MODEL_POLICIES", err.Error())
+	}
+	modelPoliciesJSON, err := json.Marshal(modelPolicies)
+	if err != nil {
+		return nil, fmt.Errorf("marshal codex ticket model policies: %w", err)
+	}
+	updates[SettingKeyOpenAICodexTicketModelPolicies] = string(modelPoliciesJSON)
 	// SettingKeyOpenAICodexClientVersionSynced 由自动同步任务独占写入，此处不得覆盖，
 	// 否则面板保存会把同步结果清空。
 	// codex_cli_only 加固
@@ -746,6 +763,8 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	s.InvalidateOpenAICodexClientVersionCache()
 	s.InvalidateOpenAICodexTicketEnabledCache()
 	s.InvalidateOpenAICodexTicketHarvestProxyCache()
+	s.InvalidateOpenAICodexTicketRetryPolicyCache()
+	s.InvalidateOpenAICodexTicketModelPoliciesCache()
 	openAIAdvancedSchedulerSettingSF.Forget(openAIAdvancedSchedulerSettingKey)
 	openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
 		lowUpstreamRatePriorityEnabled: settings.OpenAILowUpstreamRatePriorityEnabled,

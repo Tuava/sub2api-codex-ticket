@@ -80,3 +80,11 @@ describe('AppSidebar subscription feature flag', () => {
     expect(componentSource).toMatch(/path: '\/purchase'[^\n]*label: purchaseNavLabel\.value/)
   })
 })
+
+describe('AppSidebar admin copyright', () => {
+  it('shows the modified-edition author in the admin sidebar footer', () => {
+    expect(componentSource).toContain('data-testid="admin-copyright"')
+    expect(componentSource).toContain('2679373771')
+    expect(componentSource).toContain('v-if="isAdmin"')
+  })
+})

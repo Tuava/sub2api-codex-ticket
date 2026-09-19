@@ -1171,6 +1171,17 @@ export interface Account {
   codex_turn_tickets?: Array<{
     model: string
     length?: number
+    observed_length?: number
+    observed_http_status?: number
+    observed_at?: string
+    next_probe_at?: string
+    observation_outcome?: string
+    ticket_type: 'target' | 'non_target' | 'missing' | 'expired' | 'rate_limited' | 'quota_exhausted' | 'error' | 'http_error' | 'token_error' | 'disabled'
+    target_length: number
+    target_mode: 'auto' | 'manual'
+    target_source: 'auto_business' | 'auto_personal' | 'manual' | 'global_default'
+    missing_policy: 'pause' | 'allow'
+    plan_type?: string
     ready: boolean
     remaining_seconds: number
     blocked: boolean

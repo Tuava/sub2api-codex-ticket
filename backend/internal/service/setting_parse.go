@@ -247,6 +247,9 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpenAICodexClientVersionSynced:                     "",
 		SettingKeyOpenAICodexVersionAutoSyncEnabled:                  "true",
 		SettingKeyOpenAICodexTicketHarvestProxyURL:                   "",
+		SettingKeyOpenAICodexTicketMissRetrySeconds:                  strconv.Itoa(openAICodexTicketDefaultMissRetrySeconds),
+		SettingKeyOpenAICodexTicketRateLimitRetrySeconds:             strconv.Itoa(openAICodexTicketDefaultRateLimitRetrySeconds),
+		SettingKeyOpenAICodexTicketModelPolicies:                     DefaultOpenAICodexTicketModelPoliciesJSON(),
 		SettingPaymentVisibleMethodAlipaySource:                      "",
 		SettingPaymentVisibleMethodWxpaySource:                       "",
 		SettingPaymentVisibleMethodAlipayEnabled:                     "false",
@@ -898,6 +901,27 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		result.OpenAICodexTicketEnabled = s.cfg.Gateway.OpenAICodexTicket.Enabled
 	}
 	result.OpenAICodexTicketHarvestProxyURL = strings.TrimSpace(settings[SettingKeyOpenAICodexTicketHarvestProxyURL])
+	result.OpenAICodexTicketMissRetrySeconds = parseOpenAICodexTicketRetrySeconds(
+		settings[SettingKeyOpenAICodexTicketMissRetrySeconds],
+		openAICodexTicketDefaultMissRetrySeconds,
+		openAICodexTicketMinMissRetrySeconds,
+		openAICodexTicketMaxMissRetrySeconds,
+	)
+	result.OpenAICodexTicketRateLimitRetrySeconds = parseOpenAICodexTicketRetrySeconds(
+		settings[SettingKeyOpenAICodexTicketRateLimitRetrySeconds],
+		openAICodexTicketDefaultRateLimitRetrySeconds,
+		openAICodexTicketMinRateLimitRetrySeconds,
+		openAICodexTicketMaxRateLimitRetrySeconds,
+	)
+	var modelPolicies map[string]config.OpenAICodexTicketModelPolicy
+	if raw := strings.TrimSpace(settings[SettingKeyOpenAICodexTicketModelPolicies]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &modelPolicies)
+	}
+	if normalized, err := NormalizeOpenAICodexTicketModelPolicies(modelPolicies); err == nil {
+		result.OpenAICodexTicketModelPolicies = normalized
+	} else {
+		result.OpenAICodexTicketModelPolicies = DefaultOpenAICodexTicketModelPolicies()
+	}
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]
 	result.MaxCodexVersion = settings[SettingKeyMaxCodexVersion]

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"log/slog"
+	"reflect"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -487,6 +488,15 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	}
 	if before.OpenAICodexTicketHarvestProxyURL != after.OpenAICodexTicketHarvestProxyURL {
 		changed = append(changed, "openai_codex_ticket_harvest_proxy_url")
+	}
+	if before.OpenAICodexTicketMissRetrySeconds != after.OpenAICodexTicketMissRetrySeconds {
+		changed = append(changed, "openai_codex_ticket_miss_retry_seconds")
+	}
+	if before.OpenAICodexTicketRateLimitRetrySeconds != after.OpenAICodexTicketRateLimitRetrySeconds {
+		changed = append(changed, "openai_codex_ticket_rate_limit_retry_seconds")
+	}
+	if !reflect.DeepEqual(before.OpenAICodexTicketModelPolicies, after.OpenAICodexTicketModelPolicies) {
+		changed = append(changed, "openai_codex_ticket_model_policies")
 	}
 	if before.OpenAICodexUserAgent != after.OpenAICodexUserAgent {
 		changed = append(changed, "openai_codex_user_agent")

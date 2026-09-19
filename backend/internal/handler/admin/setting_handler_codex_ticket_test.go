@@ -46,3 +46,27 @@ func TestSettingsCodexTicketRejectInvalidProxyWithoutLeakingPassword(t *testing.
 	require.NotContains(t, rec.Body.String(), "invalid-secret")
 	require.Equal(t, "http://previous.example.com:8080", repo.values[key])
 }
+
+func TestSettingsCodexTicketRetrySecondsWriteReadAndValidation(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
+	missKey := service.SettingKeyOpenAICodexTicketMissRetrySeconds
+	rateLimitKey := service.SettingKeyOpenAICodexTicketRateLimitRetrySeconds
+
+	rec := doUpdateSettings(t, h, map[string]any{
+		missKey:      600,
+		rateLimitKey: 7200,
+	}, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "600", repo.values[missKey])
+	require.Equal(t, "7200", repo.values[rateLimitKey])
+	require.Contains(t, rec.Body.String(), `"openai_codex_ticket_miss_retry_seconds":600`)
+	require.Contains(t, rec.Body.String(), `"openai_codex_ticket_rate_limit_retry_seconds":7200`)
+
+	rec = doUpdateSettings(t, h, map[string]any{missKey: 0}, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Equal(t, "600", repo.values[missKey])
+
+	rec = doUpdateSettings(t, h, map[string]any{rateLimitKey: 604801}, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Equal(t, "7200", repo.values[rateLimitKey])
+}

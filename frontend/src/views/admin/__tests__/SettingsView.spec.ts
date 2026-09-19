@@ -754,6 +754,29 @@ describe("admin SettingsView payment visible method controls", () => {
     wrapper.unmount();
   });
 
+  it("loads and saves the Codex ticket retry intervals", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_codex_ticket_miss_retry_seconds: 900,
+      openai_codex_ticket_rate_limit_retry_seconds: 1800,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    await flushPromises();
+    const miss = wrapper.get<HTMLInputElement>("#codex-ticket-miss-retry-seconds");
+    const rateLimited = wrapper.get<HTMLInputElement>("#codex-ticket-rate-limit-retry-seconds");
+    expect(miss.element.value).toBe("900");
+    expect(rateLimited.element.value).toBe("1800");
+    await miss.setValue(1200);
+    await rateLimited.setValue(7200);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_miss_retry_seconds).toBe(1200);
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_rate_limit_retry_seconds).toBe(7200);
+    wrapper.unmount();
+  });
+
   it("loads and saves the open button visibility for each custom menu", async () => {
     const menuItems = [
       { id: "docs", label: "Docs", url: "https://example.com/docs", icon_svg: "", visibility: "user", sort_order: 0 },

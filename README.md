@@ -14,6 +14,8 @@
 
 **AI API Gateway Platform for Subscription Quota Distribution**
 
+Modified edition maintained by **2679373771**. See [NOTICE.md](NOTICE.md) for attribution.
+
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
 </div>
