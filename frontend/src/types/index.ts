@@ -1640,6 +1640,8 @@ export interface AdminDataImportResult {
   account_failed: number
   proxy_assigned?: number
   proxy_assign_failed?: number
+  post_import_updated?: number
+  post_import_failed?: number
   errors?: AdminDataImportError[]
 }
 

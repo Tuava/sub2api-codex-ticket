@@ -3,7 +3,7 @@
     :show="show"
     :title="t('admin.accounts.dataImportTitle')"
     width="normal"
-    close-on-click-outside
+    :close-on-click-outside="!showBulkConfig"
     @close="handleClose"
   >
     <form id="import-data-form" class="space-y-4" @submit.prevent="handleImport">
@@ -57,6 +57,38 @@
         show-enable
       />
 
+      <div class="rounded-xl border border-gray-200 p-4 dark:border-dark-700">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <div class="text-sm font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.accounts.dataImportBulkConfigTitle') }}
+            </div>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.dataImportBulkConfigHint') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm"
+            data-testid="open-import-bulk-config"
+            :disabled="files.length === 0"
+            @click="showBulkConfig = true"
+          >
+            {{ postImportUpdates ? t('common.edit') : t('admin.accounts.dataImportConfigure') }}
+          </button>
+        </div>
+        <div
+          v-if="postImportUpdates"
+          class="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300"
+          data-testid="import-bulk-config-ready"
+        >
+          {{ t('admin.accounts.dataImportBulkConfigReady', { count: Object.keys(postImportUpdates).length }) }}
+          <button type="button" class="ml-2 underline" @click="postImportUpdates = null">
+            {{ t('common.clear') }}
+          </button>
+        </div>
+      </div>
+
       <div
         v-if="result"
         class="space-y-2 rounded-xl border border-gray-200 p-4 dark:border-dark-700"
@@ -99,6 +131,24 @@
       </div>
     </template>
   </BaseDialog>
+
+  <BulkEditAccountModal
+    :show="showBulkConfig"
+    :account-ids="[]"
+    :selected-platforms="importPlatforms"
+    :selected-types="importTypes"
+    :target="{
+      mode: 'selected',
+      previewCount: importAccountCount,
+      selectedPlatforms: importPlatforms,
+      selectedTypes: importTypes
+    }"
+    :proxies="proxies"
+    :groups="groups"
+    config-only
+    @close="showBulkConfig = false"
+    @configured="handleBulkConfigured"
+  />
 </template>
 
 <script setup lang="ts">
@@ -106,12 +156,23 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import SmartProxyAssignmentPanel from '@/components/account/SmartProxyAssignmentPanel.vue'
+import BulkEditAccountModal from '@/components/account/BulkEditAccountModal.vue'
 import { adminAPI } from '@/api/admin'
 import { useAppStore } from '@/stores/app'
-import type { AdminDataImportResult, AdminDataPayload, SmartProxyAssignmentOptions } from '@/types'
+import type {
+  AccountPlatform,
+  AccountType,
+  AdminDataImportResult,
+  AdminDataPayload,
+  AdminGroup,
+  Proxy,
+  SmartProxyAssignmentOptions
+} from '@/types'
 
 interface Props {
   show: boolean
+  proxies?: Proxy[]
+  groups?: AdminGroup[]
 }
 
 interface Emits {
@@ -119,7 +180,10 @@ interface Emits {
   (e: 'imported'): void
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  proxies: () => [],
+  groups: () => []
+})
 const emit = defineEmits<Emits>()
 
 const { t } = useI18n()
@@ -131,6 +195,9 @@ const dragDepth = ref(0)
 const dragActive = computed(() => dragDepth.value > 0)
 const hasCreatedData = ref(false)
 const result = ref<AdminDataImportResult | null>(null)
+const parsedPayloads = ref<AdminDataPayload[]>([])
+const showBulkConfig = ref(false)
+const postImportUpdates = ref<Record<string, unknown> | null>(null)
 const smartProxyOptions = ref<SmartProxyAssignmentOptions>({
   enabled: false,
   proxy_count: 2,
@@ -141,6 +208,14 @@ const smartProxyOptions = ref<SmartProxyAssignmentOptions>({
 })
 
 const fileInput = ref<HTMLInputElement | null>(null)
+const importedAccounts = computed(() => parsedPayloads.value.flatMap((payload) => payload.accounts))
+const importAccountCount = computed(() => importedAccounts.value.length)
+const importPlatforms = computed<AccountPlatform[]>(() => Array.from(new Set(
+  importedAccounts.value.map((account) => account.platform).filter(Boolean)
+)))
+const importTypes = computed<AccountType[]>(() => Array.from(new Set(
+  importedAccounts.value.map((account) => account.type).filter(Boolean)
+)))
 const selectedFilesLabel = computed(() => {
   if (files.value.length === 0) return ''
   if (files.value.length === 1) return files.value[0]?.name || ''
@@ -158,6 +233,9 @@ watch(
       dragDepth.value = 0
       hasCreatedData.value = false
       result.value = null
+      parsedPayloads.value = []
+      showBulkConfig.value = false
+      postImportUpdates.value = null
       smartProxyOptions.value = {
         enabled: false,
         proxy_count: 2,
@@ -177,9 +255,9 @@ const openFilePicker = () => {
   fileInput.value?.click()
 }
 
-const handleFileChange = (event: Event) => {
+const handleFileChange = async (event: Event) => {
   const target = event.target as HTMLInputElement
-  setSelectedFiles(target.files)
+  await setSelectedFiles(target.files)
   target.value = ''
 }
 
@@ -197,7 +275,7 @@ const isJsonFile = (sourceFile: File) => {
   return name.endsWith('.json') || sourceFile.type === 'application/json'
 }
 
-const setSelectedFiles = (sourceFiles: FileList | File[] | null | undefined) => {
+const setSelectedFiles = async (sourceFiles: FileList | File[] | null | undefined) => {
   if (importing.value) return
   const incoming = Array.from(sourceFiles || [])
   const picked = incoming.filter(isJsonFile)
@@ -212,6 +290,17 @@ const setSelectedFiles = (sourceFiles: FileList | File[] | null | undefined) => 
   }
   files.value = picked
   result.value = null
+  postImportUpdates.value = null
+  parsedPayloads.value = []
+  for (const sourceFile of picked) {
+    try {
+      const parsed = JSON.parse(await readFileAsText(sourceFile))
+      if (isValidDataPayload(parsed)) parsedPayloads.value.push(parsed)
+    } catch {
+      // Detailed validation remains in handleImport so the selected file is
+      // still visible and the user receives the existing localized error.
+    }
+  }
 }
 
 const handleDragEnter = () => {
@@ -223,10 +312,10 @@ const handleDragLeave = () => {
   dragDepth.value = Math.max(0, dragDepth.value - 1)
 }
 
-const handleDrop = (event: DragEvent) => {
+const handleDrop = async (event: DragEvent) => {
   dragDepth.value = 0
   if (importing.value) return
-  setSelectedFiles(event.dataTransfer?.files)
+  await setSelectedFiles(event.dataTransfer?.files)
 }
 
 const readFileAsText = async (sourceFile: File): Promise<string> => {
@@ -289,6 +378,11 @@ const mergeDataPayloads = (payloads: AdminDataPayload[]): AdminDataPayload => {
   }
 }
 
+const handleBulkConfigured = (updates: Record<string, unknown>) => {
+  postImportUpdates.value = updates
+  showBulkConfig.value = false
+}
+
 const handleImport = async () => {
   if (files.value.length === 0) {
     appStore.showError(t('admin.accounts.dataImportSelectFile'))
@@ -319,6 +413,7 @@ const handleImport = async () => {
     const res = await adminAPI.accounts.importData({
       data: dataPayload,
       skip_default_group_bind: true,
+      post_import_updates: postImportUpdates.value ?? undefined,
       smart_proxy_assignment: smartProxyOptions.value.enabled
         ? smartProxyOptions.value
         : undefined
@@ -334,8 +429,15 @@ const handleImport = async () => {
       proxy_failed: res.proxy_failed,
       proxy_assigned: res.proxy_assigned || 0,
       proxy_assign_failed: res.proxy_assign_failed || 0,
+      post_import_updated: res.post_import_updated || 0,
+      post_import_failed: res.post_import_failed || 0,
     }
-    if (res.account_failed > 0 || res.proxy_failed > 0 || (res.proxy_assign_failed || 0) > 0) {
+    if (
+      res.account_failed > 0 ||
+      res.proxy_failed > 0 ||
+      (res.proxy_assign_failed || 0) > 0 ||
+      (res.post_import_failed || 0) > 0
+    ) {
       // 部分成功也创建了数据;弹窗关闭时通过 imported 通知父组件刷新列表
       if (res.account_created > 0 || res.proxy_created > 0) {
         hasCreatedData.value = true

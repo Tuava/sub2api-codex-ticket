@@ -76,6 +76,7 @@ type DataAccount struct {
 type DataImportRequest struct {
 	Data                 DataPayload                  `json:"data"`
 	SkipDefaultGroupBind *bool                        `json:"skip_default_group_bind"`
+	PostImportUpdates    *BulkUpdateAccountsRequest   `json:"post_import_updates,omitempty"`
 	SmartProxyAssignment *SmartProxyAssignmentOptions `json:"smart_proxy_assignment,omitempty"`
 }
 
@@ -87,6 +88,8 @@ type DataImportResult struct {
 	AccountFailed     int               `json:"account_failed"`
 	ProxyAssigned     int               `json:"proxy_assigned,omitempty"`
 	ProxyAssignFailed int               `json:"proxy_assign_failed,omitempty"`
+	PostImportUpdated int               `json:"post_import_updated,omitempty"`
+	PostImportFailed  int               `json:"post_import_failed,omitempty"`
 	Errors            []DataImportError `json:"errors,omitempty"`
 }
 
@@ -498,6 +501,47 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		h.scheduleGrokImportProbe(created)
 		createdAccountIDs = append(createdAccountIDs, created.ID)
 		result.AccountCreated++
+	}
+
+	if req.PostImportUpdates != nil && len(createdAccountIDs) > 0 && hasBulkUpdateAccountFields(req.PostImportUpdates) {
+		postUpdates := *req.PostImportUpdates
+		// Security/correctness invariant: post-import edits can only target accounts
+		// created by this import invocation. Ignore caller-supplied IDs/filters.
+		postUpdates.AccountIDs = append([]int64(nil), createdAccountIDs...)
+		postUpdates.Filters = nil
+		if postUpdates.RateMultiplier != nil && *postUpdates.RateMultiplier < 0 {
+			result.PostImportFailed = len(createdAccountIDs)
+			result.Errors = append(result.Errors, DataImportError{
+				Kind: "account", Name: "post_import_updates", Message: "rate_multiplier must be >= 0",
+			})
+		} else {
+			sanitizeExtraBaseRPM(postUpdates.Extra)
+			if validateErr := service.ValidateUpstreamRequestIDHeaderExtra(postUpdates.Extra); validateErr != nil {
+				result.PostImportFailed = len(createdAccountIDs)
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: "post_import_updates", Message: validateErr.Error(),
+				})
+			} else {
+				updated, updateErr := h.adminService.BulkUpdateAccounts(ctx, toServiceBulkUpdateAccountsInput(&postUpdates))
+				if updateErr != nil {
+					result.PostImportFailed = len(createdAccountIDs)
+					result.Errors = append(result.Errors, DataImportError{
+						Kind: "account", Name: "post_import_updates", Message: updateErr.Error(),
+					})
+				} else {
+					result.PostImportUpdated = updated.Success
+					result.PostImportFailed = updated.Failed
+					for _, item := range updated.Results {
+						if item.Success {
+							continue
+						}
+						result.Errors = append(result.Errors, DataImportError{
+							Kind: "account", Name: fmt.Sprintf("account:%d", item.AccountID), Message: item.Error,
+						})
+					}
+				}
+			}
+		}
 	}
 
 	if req.SmartProxyAssignment != nil && req.SmartProxyAssignment.Enabled && len(createdAccountIDs) > 0 {

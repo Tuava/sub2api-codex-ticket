@@ -199,6 +199,47 @@ type BulkUpdateAccountFilters struct {
 	PrivacyMode string `json:"privacy_mode"`
 }
 
+func hasBulkUpdateAccountFields(req *BulkUpdateAccountsRequest) bool {
+	if req == nil {
+		return false
+	}
+	return req.Name != "" ||
+		req.ProxyID != nil ||
+		req.Concurrency != nil ||
+		req.Priority != nil ||
+		req.RateMultiplier != nil ||
+		req.LoadFactor != nil ||
+		req.Status != "" ||
+		req.Schedulable != nil ||
+		req.GroupIDs != nil ||
+		len(req.Credentials) > 0 ||
+		len(req.Extra) > 0 ||
+		req.ProbeEnabled != nil
+}
+
+func toServiceBulkUpdateAccountsInput(req *BulkUpdateAccountsRequest) *service.BulkUpdateAccountsInput {
+	if req == nil {
+		return nil
+	}
+	return &service.BulkUpdateAccountsInput{
+		AccountIDs:            req.AccountIDs,
+		Filters:               toServiceBulkUpdateAccountFilters(req.Filters),
+		Name:                  req.Name,
+		ProxyID:               req.ProxyID,
+		Concurrency:           req.Concurrency,
+		Priority:              req.Priority,
+		RateMultiplier:        req.RateMultiplier,
+		LoadFactor:            req.LoadFactor,
+		Status:                req.Status,
+		Schedulable:           req.Schedulable,
+		GroupIDs:              req.GroupIDs,
+		Credentials:           req.Credentials,
+		Extra:                 req.Extra,
+		ProbeEnabled:          req.ProbeEnabled,
+		SkipMixedChannelCheck: req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk,
+	}
+}
+
 // CheckMixedChannelRequest represents check mixed channel risk request
 type CheckMixedChannelRequest struct {
 	Platform  string  `json:"platform" binding:"required"`
@@ -2362,41 +2403,14 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	// 确定是否跳过混合渠道检查
 	skipCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
 
-	hasUpdates := req.Name != "" ||
-		req.ProxyID != nil ||
-		req.Concurrency != nil ||
-		req.Priority != nil ||
-		req.RateMultiplier != nil ||
-		req.LoadFactor != nil ||
-		req.Status != "" ||
-		req.Schedulable != nil ||
-		req.GroupIDs != nil ||
-		len(req.Credentials) > 0 ||
-		len(req.Extra) > 0 ||
-		req.ProbeEnabled != nil
-
-	if !hasUpdates {
+	if !hasBulkUpdateAccountFields(&req) {
 		response.BadRequest(c, "No updates provided")
 		return
 	}
 
-	result, err := h.adminService.BulkUpdateAccounts(c.Request.Context(), &service.BulkUpdateAccountsInput{
-		AccountIDs:            req.AccountIDs,
-		Filters:               toServiceBulkUpdateAccountFilters(req.Filters),
-		Name:                  req.Name,
-		ProxyID:               req.ProxyID,
-		Concurrency:           req.Concurrency,
-		Priority:              req.Priority,
-		RateMultiplier:        req.RateMultiplier,
-		LoadFactor:            req.LoadFactor,
-		Status:                req.Status,
-		Schedulable:           req.Schedulable,
-		GroupIDs:              req.GroupIDs,
-		Credentials:           req.Credentials,
-		Extra:                 req.Extra,
-		ProbeEnabled:          req.ProbeEnabled,
-		SkipMixedChannelCheck: skipCheck,
-	})
+	bulkInput := toServiceBulkUpdateAccountsInput(&req)
+	bulkInput.SkipMixedChannelCheck = skipCheck
+	result, err := h.adminService.BulkUpdateAccounts(c.Request.Context(), bulkInput)
 	if err != nil {
 		var mixedErr *service.MixedChannelError
 		if errors.As(err, &mixedErr) {

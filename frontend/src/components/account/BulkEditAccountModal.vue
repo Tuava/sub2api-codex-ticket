@@ -1,7 +1,7 @@
 <template>
   <BaseDialog
     :show="show"
-    :title="t('admin.accounts.bulkEdit.title')"
+    :title="configOnly ? t('admin.accounts.dataImportBulkConfigTitle') : t('admin.accounts.bulkEdit.title')"
     width="wide"
     @close="handleClose"
   >
@@ -17,7 +17,7 @@
               d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
             />
           </svg>
-          {{ t('admin.accounts.bulkEdit.selectionInfo', { count: targetMode === 'filtered' ? targetPreviewCount : accountIds.length }) }}
+          {{ t('admin.accounts.bulkEdit.selectionInfo', { count: displayTargetCount }) }}
         </p>
       </div>
 
@@ -693,7 +693,7 @@
       </div>
 
       <!-- Smart random proxy assignment -->
-      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="!configOnly" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <SmartProxyAssignmentPanel
           v-model="smartProxyOptions"
           :loading="assigningSmartProxies"
@@ -1462,7 +1462,11 @@
             />
           </svg>
           {{
-            submitting ? t('admin.accounts.bulkEdit.updating') : t('admin.accounts.bulkEdit.submit')
+            submitting
+              ? t('admin.accounts.bulkEdit.updating')
+              : configOnly
+                ? t('admin.accounts.dataImportSaveBulkConfig')
+                : t('admin.accounts.bulkEdit.submit')
           }}
         </button>
       </div>
@@ -1542,12 +1546,16 @@ interface Props {
   }
   proxies: ProxyConfig[]
   groups: AdminGroup[]
+  configOnly?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  configOnly: false
+})
 const emit = defineEmits<{
   close: []
   updated: []
+  configured: [updates: Record<string, unknown>]
 }>()
 
 const { t } = useI18n()
@@ -1556,6 +1564,9 @@ const appStore = useAppStore()
 // Platform awareness
 const targetMode = computed(() => props.target?.mode ?? 'selected')
 const targetPreviewCount = computed(() => props.target?.previewCount ?? props.accountIds.length)
+const displayTargetCount = computed(() => props.configOnly
+  ? targetPreviewCount.value
+  : targetMode.value === 'filtered' ? targetPreviewCount.value : props.accountIds.length)
 const targetSelectedPlatforms = computed(() => props.target?.selectedPlatforms ?? props.selectedPlatforms)
 const targetSelectedTypes = computed(() => props.target?.selectedTypes ?? props.selectedTypes)
 // Grok 快捷端点仅在所选账号全部为 grok 平台时展示（其他平台不显示）
@@ -2244,7 +2255,7 @@ const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise
 }
 
 const handleSubmit = async () => {
-  if (targetMode.value === 'selected' && props.accountIds.length === 0) {
+  if (!props.configOnly && targetMode.value === 'selected' && props.accountIds.length === 0) {
     appStore.showError(t('admin.accounts.bulkEdit.noSelection'))
     return
   }
@@ -2310,6 +2321,15 @@ const handleSubmit = async () => {
   const built = buildUpdatePayload()
   if (!built) {
     appStore.showError(t('admin.accounts.bulkEdit.noFieldsSelected'))
+    return
+  }
+
+  if (props.configOnly) {
+    if (enableGroups.value) {
+      built.confirm_mixed_channel_risk = true
+    }
+    emit('configured', built)
+    handleClose()
     return
   }
 

@@ -763,11 +763,13 @@ export async function exportData(options?: {
 export async function importData(payload: {
   data: AdminDataPayload
   skip_default_group_bind?: boolean
+  post_import_updates?: Record<string, unknown>
   smart_proxy_assignment?: SmartProxyAssignmentOptions
 }): Promise<AdminDataImportResult> {
   const { data } = await apiClient.post<AdminDataImportResult>('/admin/accounts/data', {
     data: payload.data,
     skip_default_group_bind: payload.skip_default_group_bind,
+    post_import_updates: payload.post_import_updates,
     smart_proxy_assignment: payload.smart_proxy_assignment
   }, payload.smart_proxy_assignment?.enabled ? { timeout: 300000 } : undefined)
   return data

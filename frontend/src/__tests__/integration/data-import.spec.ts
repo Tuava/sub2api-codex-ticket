@@ -22,18 +22,30 @@ vi.mock('@/api/admin', () => ({
   }
 }))
 
-vi.mock('vue-i18n', () => ({
-  useI18n: () => ({
-    t: (key: string) => key
-  })
-}))
+vi.mock('vue-i18n', async () => {
+  const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
+  return {
+    ...actual,
+    useI18n: () => ({
+      t: (key: string) => key
+    })
+  }
+})
 
 const mountModal = () =>
   mount(ImportDataModal, {
     props: { show: true },
     global: {
       stubs: {
-        BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }
+        BaseDialog: {
+          props: { show: Boolean },
+          template: '<div v-if="show"><slot /><slot name="footer" /></div>'
+        },
+        GroupSelector: true,
+        ProxySelector: true,
+        ModelWhitelistSelector: true,
+        ConfirmDialog: true,
+        Icon: true
       }
     }
   })
@@ -210,6 +222,49 @@ describe('ImportDataModal', () => {
     }))
   })
 
+  it('可复用完整批量编辑面板生成导入后配置', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 1,
+      account_failed: 0,
+      post_import_updated: 1,
+      post_import_failed: 0
+    })
+    const wrapper = mountModal()
+    const input = wrapper.find('input[type="file"]')
+    setInputFiles(input.element, [makeJsonFile(
+      'data.json',
+      JSON.stringify({
+        exported_at: '2026-07-05T00:00:00Z',
+        proxies: [],
+        accounts: [{ name: 'a', platform: 'openai', type: 'apikey' }]
+      })
+    )])
+    await input.trigger('change')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="open-import-bulk-config"]').trigger('click')
+    await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-concurrency').setValue(6)
+    await wrapper.get('#bulk-edit-priority-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-priority').setValue(9)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="import-bulk-config-ready"]').exists()).toBe(true)
+    await wrapper.get('#import-data-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith(expect.objectContaining({
+      post_import_updates: {
+        concurrency: 6,
+        priority: 9
+      }
+    }))
+  })
+
   it('部分成功时关闭弹窗仍通知父组件刷新', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
@@ -240,8 +295,11 @@ describe('ImportDataModal', () => {
     expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportCompletedWithErrors')
     expect(wrapper.emitted('imported')).toBeUndefined()
 
-    // 第二个 btn-secondary 是 footer 的取消按钮(第一个是选择文件)
-    await wrapper.findAll('button.btn-secondary')[1]!.trigger('click')
+    const cancelButton = wrapper.findAll('button.btn-secondary').find(
+      (button) => button.text() === 'common.cancel'
+    )
+    expect(cancelButton).toBeDefined()
+    await cancelButton!.trigger('click')
 
     expect(wrapper.emitted('imported')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)

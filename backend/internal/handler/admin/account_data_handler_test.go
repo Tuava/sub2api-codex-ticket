@@ -408,6 +408,49 @@ func TestImportDataSmartAssignsCreatedAccounts(t *testing.T) {
 	require.Len(t, *adminSvc.lastUpdateAccountInput.ProxyPoolIDs, 1)
 }
 
+func TestImportDataAppliesPostImportBulkUpdatesOnlyToCreatedAccounts(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	concurrency := 7
+	priority := 12
+	schedulable := true
+	payload := map[string]any{
+		"data": map[string]any{
+			"type": dataType, "version": dataVersion, "proxies": []any{},
+			"accounts": []map[string]any{{
+				"name": "acc", "platform": service.PlatformOpenAI, "type": service.AccountTypeAPIKey,
+				"credentials": map[string]any{"api_key": "x"}, "concurrency": 3, "priority": 50,
+			}},
+		},
+		"post_import_updates": map[string]any{
+			// These caller-supplied target selectors must be ignored.
+			"account_ids": []int64{999999},
+			"filters":     map[string]any{"platform": "anthropic"},
+			"concurrency": concurrency,
+			"priority":    priority,
+			"schedulable": schedulable,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var responseBody struct {
+		Data DataImportResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &responseBody))
+	require.Equal(t, 1, responseBody.Data.PostImportUpdated)
+	require.Zero(t, responseBody.Data.PostImportFailed)
+	require.NotNil(t, adminSvc.lastBulkUpdateAccountInput)
+	require.Equal(t, []int64{300}, adminSvc.lastBulkUpdateAccountInput.AccountIDs)
+	require.Nil(t, adminSvc.lastBulkUpdateAccountInput.Filters)
+	require.Equal(t, concurrency, *adminSvc.lastBulkUpdateAccountInput.Concurrency)
+	require.Equal(t, priority, *adminSvc.lastBulkUpdateAccountInput.Priority)
+	require.Equal(t, schedulable, *adminSvc.lastBulkUpdateAccountInput.Schedulable)
+}
+
 func TestExportDataExcludesCodexTicketMaterial(t *testing.T) {
 	router, adminSvc := setupAccountDataRouter()
 	extra := map[string]any{
