@@ -293,13 +293,14 @@ func resolveOpenAICodexTicketPolicyForModel(account *Account, cfg config.OpenAIC
 				policy.Enabled = enabled
 			}
 			mode, _ := override[OpenAICodexTicketTargetModeExtraKey].(string)
-			if mode == openAICodexTicketTargetModeManual {
+			switch mode {
+			case openAICodexTicketTargetModeManual:
 				if target := openAICodexTicketExtraInt(override, OpenAICodexTicketTargetLengthExtraKey); target >= openAICodexTicketMinTargetLength && target <= openAICodexTicketMaxTargetLength {
 					policy.TargetMode = mode
 					policy.TargetLength = target
 					policy.TargetSource = "account_model_manual"
 				}
-			} else if mode == openAICodexTicketTargetModeAuto {
+			case openAICodexTicketTargetModeAuto:
 				applyAutoTarget(policy.TargetLength, "account_model_auto")
 			}
 			if missing, _ := override[OpenAICodexTicketMissingPolicyExtraKey].(string); missing == openAICodexTicketMissingPolicyPause || missing == openAICodexTicketMissingPolicyAllow {
@@ -1027,10 +1028,10 @@ func (s *OpenAIGatewayService) ProbeOpenAICodexTicket(ctx context.Context, accou
 	cfg := s.openAICodexTicketConfig()
 	policy := resolveOpenAICodexTicketPolicyForModel(account, cfg, model)
 	if !policy.Enabled {
-		return nil, fmt.Errorf("Codex ticket model %s is disabled", model)
+		return nil, fmt.Errorf("codex ticket model %s is disabled", model)
 	}
 	if !s.openAICodexTicketEnabledContext(ctx) {
-		return nil, errors.New("Codex ticket harvesting is disabled")
+		return nil, errors.New("codex ticket harvesting is disabled")
 	}
 	s.probeOnceOpenAICodexTicket(ctx, account, model)
 	if refreshed, refreshErr := s.accountRepo.GetByID(ctx, accountID); refreshErr == nil && refreshed != nil {
