@@ -1658,6 +1658,13 @@
           />
           <p class="input-hint">{{ t('admin.accounts.proxyPoolHint') }}</p>
         </div>
+        <div class="mt-4">
+          <SmartProxyAssignmentPanel
+            v-model="smartProxyOptions"
+            :loading="assigningSmartProxies"
+            @apply="handleSmartProxyAssignment"
+          />
+        </div>
       </div>
 
       <UpstreamRequestIdHeaderField
@@ -3083,7 +3090,8 @@ import type {
   OpenAIEndpointCapability,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState
+  GrokMediaEligibilityState,
+  SmartProxyAssignmentOptions
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -3094,6 +3102,7 @@ import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import ProxyPoolSelector from '@/components/common/ProxyPoolSelector.vue'
+import SmartProxyAssignmentPanel from '@/components/account/SmartProxyAssignmentPanel.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
@@ -3990,6 +3999,15 @@ const form = reactive({
   group_ids: [] as number[],
   expires_at: null as number | null
 })
+
+const smartProxyOptions = ref<SmartProxyAssignmentOptions>({
+  proxy_count: 2,
+  test_latency: true,
+  prefer_low_latency: true,
+  low_latency_limit: 0,
+  weighted_by_load: true
+})
+const assigningSmartProxies = ref(false)
 
 const handleUpstreamBillingRateSyncChange = (enabled: boolean) => {
   upstreamBillingRateSyncEnabled.value = enabled
@@ -5051,6 +5069,35 @@ const handleClose = () => {
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
   emit('close')
+}
+
+const handleSmartProxyAssignment = async () => {
+  if (!props.account || props.account.parent_account_id != null) return
+  assigningSmartProxies.value = true
+  try {
+    const result = await adminAPI.accounts.smartAssignProxies(
+      [props.account.id],
+      smartProxyOptions.value
+    )
+    const item = result.items.find((entry) => entry.account_id === props.account?.id)
+    if (!item?.success || !item.primary_proxy_id) {
+      appStore.showError(item?.error || t('admin.accounts.smartProxy.failed'))
+      return
+    }
+    form.proxy_id = item.primary_proxy_id
+    form.proxy_pool_ids = [...(item.proxy_pool_ids ?? [])]
+    const refreshed = await adminAPI.accounts.getById(props.account.id)
+    appStore.showSuccess(t('admin.accounts.smartProxy.success', {
+      success: 1,
+      failed: 0,
+      proxies: 1 + form.proxy_pool_ids.length
+    }))
+    emit('updated', refreshed)
+  } catch (error: any) {
+    appStore.showError(error.message || t('admin.accounts.smartProxy.failed'))
+  } finally {
+    assigningSmartProxies.value = false
+  }
 }
 
 const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Account): Promise<Account> => {

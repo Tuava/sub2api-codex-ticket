@@ -371,6 +371,43 @@ func TestImportDataRestoresProxyPoolKeys(t *testing.T) {
 	require.Equal(t, []int64{2}, adminSvc.createdAccounts[0].ProxyPoolIDs)
 }
 
+func TestImportDataSmartAssignsCreatedAccounts(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	adminSvc.proxyCounts = []service.ProxyWithAccountCount{
+		{Proxy: service.Proxy{ID: 1, Protocol: "http", Host: "127.0.0.1", Port: 8001, Status: service.StatusActive}},
+		{Proxy: service.Proxy{ID: 2, Protocol: "http", Host: "127.0.0.1", Port: 8002, Status: service.StatusActive}},
+	}
+	payload := map[string]any{
+		"data": map[string]any{
+			"type": dataType, "version": dataVersion, "proxies": []any{},
+			"accounts": []map[string]any{{
+				"name": "acc", "platform": service.PlatformOpenAI, "type": service.AccountTypeAPIKey,
+				"credentials": map[string]any{"api_key": "x"}, "concurrency": 3, "priority": 50,
+			}},
+		},
+		"smart_proxy_assignment": map[string]any{
+			"enabled": true, "proxy_count": 2, "test_latency": true,
+			"prefer_low_latency": true, "weighted_by_load": true,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var responseBody struct {
+		Data DataImportResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &responseBody))
+	require.Equal(t, 1, responseBody.Data.ProxyAssigned)
+	require.Zero(t, responseBody.Data.ProxyAssignFailed)
+	require.Equal(t, 1, adminSvc.updateAccountCalls)
+	require.NotNil(t, adminSvc.lastUpdateAccountInput.ProxyID)
+	require.Len(t, *adminSvc.lastUpdateAccountInput.ProxyPoolIDs, 1)
+}
+
 func TestExportDataExcludesCodexTicketMaterial(t *testing.T) {
 	router, adminSvc := setupAccountDataRouter()
 	extra := map[string]any{

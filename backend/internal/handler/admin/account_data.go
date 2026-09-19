@@ -74,17 +74,20 @@ type DataAccount struct {
 }
 
 type DataImportRequest struct {
-	Data                 DataPayload `json:"data"`
-	SkipDefaultGroupBind *bool       `json:"skip_default_group_bind"`
+	Data                 DataPayload                  `json:"data"`
+	SkipDefaultGroupBind *bool                        `json:"skip_default_group_bind"`
+	SmartProxyAssignment *SmartProxyAssignmentOptions `json:"smart_proxy_assignment,omitempty"`
 }
 
 type DataImportResult struct {
-	ProxyCreated   int               `json:"proxy_created"`
-	ProxyReused    int               `json:"proxy_reused"`
-	ProxyFailed    int               `json:"proxy_failed"`
-	AccountCreated int               `json:"account_created"`
-	AccountFailed  int               `json:"account_failed"`
-	Errors         []DataImportError `json:"errors,omitempty"`
+	ProxyCreated      int               `json:"proxy_created"`
+	ProxyReused       int               `json:"proxy_reused"`
+	ProxyFailed       int               `json:"proxy_failed"`
+	AccountCreated    int               `json:"account_created"`
+	AccountFailed     int               `json:"account_failed"`
+	ProxyAssigned     int               `json:"proxy_assigned,omitempty"`
+	ProxyAssignFailed int               `json:"proxy_assign_failed,omitempty"`
+	Errors            []DataImportError `json:"errors,omitempty"`
 }
 
 type DataImportError struct {
@@ -412,6 +415,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 
 	// 收集需要异步设置隐私的 Antigravity OAuth 账号
 	var privacyAccounts []*service.Account
+	createdAccountIDs := make([]int64, 0, len(dataPayload.Accounts))
 
 	for i := range dataPayload.Accounts {
 		item := dataPayload.Accounts[i]
@@ -492,7 +496,29 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			privacyAccounts = append(privacyAccounts, created)
 		}
 		h.scheduleGrokImportProbe(created)
+		createdAccountIDs = append(createdAccountIDs, created.ID)
 		result.AccountCreated++
+	}
+
+	if req.SmartProxyAssignment != nil && req.SmartProxyAssignment.Enabled && len(createdAccountIDs) > 0 {
+		assignment, assignErr := h.smartAssignAccountProxies(ctx, createdAccountIDs, *req.SmartProxyAssignment, nil)
+		if assignErr != nil {
+			result.ProxyAssignFailed = len(createdAccountIDs)
+			result.Errors = append(result.Errors, DataImportError{
+				Kind: "account", Name: "smart_proxy_assignment", Message: assignErr.Error(),
+			})
+		} else {
+			result.ProxyAssigned = assignment.Success
+			result.ProxyAssignFailed = assignment.Failed
+			for _, item := range assignment.Items {
+				if item.Success {
+					continue
+				}
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account", Name: fmt.Sprintf("account:%d", item.AccountID), Message: item.Error,
+				})
+			}
+		}
 	}
 
 	// 异步设置 Antigravity 隐私，避免大量导入时阻塞请求

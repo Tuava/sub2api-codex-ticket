@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, smartAssignProxiesMock, getByIdMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
+  smartAssignProxiesMock: vi.fn(),
+  getByIdMock: vi.fn(),
   authIsSimpleMode: { value: true }
 }))
 
@@ -28,7 +30,9 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       update: updateAccountMock,
-      checkMixedChannelRisk: checkMixedChannelRiskMock
+      checkMixedChannelRisk: checkMixedChannelRiskMock,
+      smartAssignProxies: smartAssignProxiesMock,
+      getById: getByIdMock
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -326,9 +330,36 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 describe('EditAccountModal', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
+    smartAssignProxiesMock.mockReset()
+    getByIdMock.mockReset()
   })
 
   afterEach(() => vi.useRealTimers())
+
+  it('账号编辑菜单可一键随机配置主代理和并发代理池', async () => {
+    const account = buildAccount()
+    smartAssignProxiesMock.mockResolvedValue({
+      success: 1,
+      failed: 0,
+      tested_proxies: 3,
+      available_proxies: 3,
+      items: [{ account_id: 1, success: true, primary_proxy_id: 8, proxy_pool_ids: [9, 10] }]
+    })
+    getByIdMock.mockResolvedValue({ ...account, proxy_id: 8, proxy_pool_ids: [9, 10] })
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="smart-proxy-count"]').setValue(3)
+    await wrapper.get('[data-testid="smart-proxy-apply"]').trigger('click')
+    await flushPromises()
+
+    expect(smartAssignProxiesMock).toHaveBeenCalledWith([1], expect.objectContaining({
+      proxy_count: 3,
+      test_latency: true,
+      prefer_low_latency: true,
+      weighted_by_load: true
+    }))
+    expect(getByIdMock).toHaveBeenCalledWith(1)
+    expect(wrapper.emitted('updated')?.[0]?.[0]).toMatchObject({ proxy_id: 8, proxy_pool_ids: [9, 10] })
+  })
 
   it('sets expiry presets from now instead of extending the saved expiry', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })

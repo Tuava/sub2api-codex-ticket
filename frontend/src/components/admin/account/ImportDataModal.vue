@@ -51,6 +51,12 @@
         />
       </div>
 
+      <SmartProxyAssignmentPanel
+        v-model="smartProxyOptions"
+        :show-action="false"
+        show-enable
+      />
+
       <div
         v-if="result"
         class="space-y-2 rounded-xl border border-gray-200 p-4 dark:border-dark-700"
@@ -99,9 +105,10 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import SmartProxyAssignmentPanel from '@/components/account/SmartProxyAssignmentPanel.vue'
 import { adminAPI } from '@/api/admin'
 import { useAppStore } from '@/stores/app'
-import type { AdminDataImportResult, AdminDataPayload } from '@/types'
+import type { AdminDataImportResult, AdminDataPayload, SmartProxyAssignmentOptions } from '@/types'
 
 interface Props {
   show: boolean
@@ -124,6 +131,14 @@ const dragDepth = ref(0)
 const dragActive = computed(() => dragDepth.value > 0)
 const hasCreatedData = ref(false)
 const result = ref<AdminDataImportResult | null>(null)
+const smartProxyOptions = ref<SmartProxyAssignmentOptions>({
+  enabled: false,
+  proxy_count: 2,
+  test_latency: true,
+  prefer_low_latency: true,
+  low_latency_limit: 0,
+  weighted_by_load: true
+})
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFilesLabel = computed(() => {
@@ -143,6 +158,14 @@ watch(
       dragDepth.value = 0
       hasCreatedData.value = false
       result.value = null
+      smartProxyOptions.value = {
+        enabled: false,
+        proxy_count: 2,
+        test_latency: true,
+        prefer_low_latency: true,
+        low_latency_limit: 0,
+        weighted_by_load: true
+      }
       if (fileInput.value) {
         fileInput.value.value = ''
       }
@@ -295,7 +318,10 @@ const handleImport = async () => {
 
     const res = await adminAPI.accounts.importData({
       data: dataPayload,
-      skip_default_group_bind: true
+      skip_default_group_bind: true,
+      smart_proxy_assignment: smartProxyOptions.value.enabled
+        ? smartProxyOptions.value
+        : undefined
     })
 
     result.value = res
@@ -306,8 +332,10 @@ const handleImport = async () => {
       proxy_created: res.proxy_created,
       proxy_reused: res.proxy_reused,
       proxy_failed: res.proxy_failed,
+      proxy_assigned: res.proxy_assigned || 0,
+      proxy_assign_failed: res.proxy_assign_failed || 0,
     }
-    if (res.account_failed > 0 || res.proxy_failed > 0) {
+    if (res.account_failed > 0 || res.proxy_failed > 0 || (res.proxy_assign_failed || 0) > 0) {
       // 部分成功也创建了数据;弹窗关闭时通过 imported 通知父组件刷新列表
       if (res.account_created > 0 || res.proxy_created > 0) {
         hasCreatedData.value = true

@@ -20,6 +20,8 @@ import type {
   CodexSessionImportRequest,
   CodexSessionImportResult,
   OpenAICodexPATCreateRequest,
+  SmartProxyAssignmentOptions,
+  SmartProxyAssignmentResult,
   CheckMixedChannelRequest,
   CheckMixedChannelResponse,
   UpstreamBillingProbeResult,
@@ -761,11 +763,25 @@ export async function exportData(options?: {
 export async function importData(payload: {
   data: AdminDataPayload
   skip_default_group_bind?: boolean
+  smart_proxy_assignment?: SmartProxyAssignmentOptions
 }): Promise<AdminDataImportResult> {
   const { data } = await apiClient.post<AdminDataImportResult>('/admin/accounts/data', {
     data: payload.data,
-    skip_default_group_bind: payload.skip_default_group_bind
-  })
+    skip_default_group_bind: payload.skip_default_group_bind,
+    smart_proxy_assignment: payload.smart_proxy_assignment
+  }, payload.smart_proxy_assignment?.enabled ? { timeout: 300000 } : undefined)
+  return data
+}
+
+export async function smartAssignProxies(
+  accountIds: number[],
+  options: SmartProxyAssignmentOptions
+): Promise<SmartProxyAssignmentResult> {
+  const { data } = await apiClient.post<SmartProxyAssignmentResult>(
+    '/admin/accounts/smart-assign-proxies',
+    { account_ids: accountIds, options },
+    { timeout: 300000 }
+  )
   return data
 }
 
@@ -1121,6 +1137,7 @@ export const accountsAPI = {
   syncFromCrs,
   exportData,
   importData,
+  smartAssignProxies,
   importCodexSession,
   createOpenAICodexPAT,
   getAntigravityDefaultModelMapping,

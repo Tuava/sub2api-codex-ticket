@@ -692,6 +692,15 @@
         </div>
       </div>
 
+      <!-- Smart random proxy assignment -->
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <SmartProxyAssignmentPanel
+          v-model="smartProxyOptions"
+          :loading="assigningSmartProxies"
+          @apply="handleSmartProxyAssignment"
+        />
+      </div>
+
       <!-- Concurrency & Priority -->
       <div class="grid grid-cols-2 gap-4 border-t border-gray-200 pt-4 dark:border-dark-600 lg:grid-cols-4">
         <div>
@@ -1490,6 +1499,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
+import SmartProxyAssignmentPanel from '@/components/account/SmartProxyAssignmentPanel.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -1516,6 +1526,8 @@ import {
   resolveOpenAIWSModeHintKey
 } from '@/utils/openaiWsMode'
 import type { OpenAIWSMode } from '@/utils/openaiWsMode'
+import { fetchAllAccountIds } from '@/utils/accountSelection'
+import type { SmartProxyAssignmentOptions } from '@/types'
 interface Props {
   show: boolean
   accountIds: number[]
@@ -1670,6 +1682,15 @@ const enableCodexCLIOnlyAppServer = ref(false)
 const enableOpenAICompactMode = ref(false)
 const enableOpenAICompactModelMapping = ref(false)
 const enableRpmLimit = ref(false)
+
+const smartProxyOptions = ref<SmartProxyAssignmentOptions>({
+  proxy_count: 2,
+  test_latency: true,
+  prefer_low_latency: true,
+  low_latency_limit: 0,
+  weighted_by_load: true
+})
+const assigningSmartProxies = ref(false)
 
 // State - field values
 const submitting = ref(false)
@@ -2170,6 +2191,34 @@ const handleClose = () => {
   pendingUpdatesForConfirm.value = null
   mixedChannelConfirmed.value = false
   emit('close')
+}
+
+const handleSmartProxyAssignment = async () => {
+  if (targetMode.value === 'selected' && props.accountIds.length === 0) {
+    appStore.showError(t('admin.accounts.bulkEdit.noSelection'))
+    return
+  }
+  assigningSmartProxies.value = true
+  try {
+    const accountIds = targetMode.value === 'filtered' && props.target?.filters
+      ? await fetchAllAccountIds(adminAPI.accounts.list, props.target.filters)
+      : props.accountIds
+    const result = await adminAPI.accounts.smartAssignProxies(accountIds, smartProxyOptions.value)
+    if (result.success > 0) {
+      appStore.showSuccess(t('admin.accounts.smartProxy.success', {
+        success: result.success,
+        failed: result.failed,
+        proxies: result.available_proxies
+      }))
+      emit('updated')
+    } else {
+      appStore.showError(t('admin.accounts.smartProxy.failed'))
+    }
+  } catch (error: any) {
+    appStore.showError(error.message || t('admin.accounts.smartProxy.failed'))
+  } finally {
+    assigningSmartProxies.value = false
+  }
 }
 
 // 预检查：提交前调接口检测，有风险就弹窗阻止，返回 false 表示需要用户确认

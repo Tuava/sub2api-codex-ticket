@@ -1638,7 +1638,34 @@ export interface AdminDataImportResult {
   proxy_failed: number
   account_created: number
   account_failed: number
+  proxy_assigned?: number
+  proxy_assign_failed?: number
   errors?: AdminDataImportError[]
+}
+
+export interface SmartProxyAssignmentOptions {
+  enabled?: boolean
+  proxy_count: number
+  test_latency: boolean
+  prefer_low_latency: boolean
+  low_latency_limit: number
+  weighted_by_load: boolean
+}
+
+export interface SmartProxyAssignmentItem {
+  account_id: number
+  success: boolean
+  primary_proxy_id?: number
+  proxy_pool_ids?: number[]
+  error?: string
+}
+
+export interface SmartProxyAssignmentResult {
+  success: number
+  failed: number
+  tested_proxies: number
+  available_proxies: number
+  items: SmartProxyAssignmentItem[]
 }
 
 export interface CodexSessionImportRequest {

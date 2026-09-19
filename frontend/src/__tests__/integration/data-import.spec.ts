@@ -175,6 +175,41 @@ describe('ImportDataModal', () => {
     expect(showSuccess).toHaveBeenCalledWith('admin.accounts.dataImportSuccess')
   })
 
+  it('可在 JSON 导入后自动执行智能代理分配', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 1,
+      proxy_failed: 0,
+      account_created: 1,
+      account_failed: 0,
+      proxy_assigned: 1,
+      proxy_assign_failed: 0
+    })
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="smart-proxy-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="smart-proxy-count"]').setValue(3)
+    const input = wrapper.find('input[type="file"]')
+    setInputFiles(input.element, [makeJsonFile(
+      'data.json',
+      JSON.stringify({ exported_at: '2026-07-05T00:00:00Z', proxies: [], accounts: [{ name: 'a' }] })
+    )])
+    await input.trigger('change')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith(expect.objectContaining({
+      smart_proxy_assignment: {
+        enabled: true,
+        proxy_count: 3,
+        test_latency: true,
+        prefer_low_latency: true,
+        low_latency_limit: 0,
+        weighted_by_load: true
+      }
+    }))
+  })
+
   it('部分成功时关闭弹窗仍通知父组件刷新', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
