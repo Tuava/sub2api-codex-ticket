@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,9 +19,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"golang.org/x/mod/semver"
 )
 
 var (
@@ -28,9 +32,10 @@ var (
 )
 
 const (
-	updateCacheKey = "update_check_cache"
-	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	updateCacheKey    = "update_check_cache"
+	updateCacheTTL    = 1200 // 20 minutes
+	defaultGitHubRepo = "Wei-Shaw/sub2api"
+	tuavaGitHubRepo   = "Tuava/sub2api-codex-ticket"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -43,6 +48,7 @@ const (
 	maxRollbackVersions = 3
 	// Fetch a few extra releases so filtering (current/newer/prerelease) still leaves enough candidates
 	rollbackFetchPageSize = 15
+	rollbackCacheTTL      = 10 * time.Minute
 )
 
 // UpdateCache defines cache operations for update service
@@ -59,22 +65,73 @@ type GitHubReleaseClient interface {
 	FetchChecksumFile(ctx context.Context, url string) ([]byte, error)
 }
 
+// GitHubAPIErrorDetails is implemented by release clients that can expose
+// rate-limit state without leaking credentials or raw response bodies.
+type GitHubAPIErrorDetails interface {
+	GitHubAPIStatus() int
+	GitHubRateLimitRemaining() string
+	GitHubRateLimitResetUnix() int64
+	GitHubTokenConfigured() bool
+}
+
 // UpdateService handles software updates
 type UpdateService struct {
 	cache          UpdateCache
 	githubClient   GitHubReleaseClient
 	currentVersion string
 	buildType      string // "source" for manual builds, "release" for CI builds
+	githubRepo     string
+	dockerImage    string
+	rollbackMu     sync.Mutex
+	rollbackCache  []*GitHubRelease
+	rollbackCached time.Time
 }
 
 // NewUpdateService creates a new UpdateService
 func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string) *UpdateService {
+	repository := resolveUpdateRepository(version, "")
 	return &UpdateService{
 		cache:          cache,
 		githubClient:   githubClient,
 		currentVersion: version,
 		buildType:      buildType,
+		githubRepo:     repository,
+		dockerImage:    resolveUpdateDockerImage(repository, ""),
 	}
+}
+
+func (s *UpdateService) ConfigureReleaseSource(repository, dockerImage string) {
+	if s == nil {
+		return
+	}
+	s.githubRepo = resolveUpdateRepository(s.currentVersion, repository)
+	s.dockerImage = resolveUpdateDockerImage(s.githubRepo, dockerImage)
+}
+
+func resolveUpdateRepository(version, configured string) string {
+	if repo := strings.TrimSpace(configured); repo != "" {
+		return repo
+	}
+	if envRepo := strings.TrimSpace(os.Getenv("UPDATE_GITHUB_REPOSITORY")); envRepo != "" {
+		return envRepo
+	}
+	if strings.Contains(strings.ToLower(version), "-tuava.") {
+		return tuavaGitHubRepo
+	}
+	return defaultGitHubRepo
+}
+
+func resolveUpdateDockerImage(repository, configured string) string {
+	if image := strings.TrimSpace(configured); image != "" {
+		return image
+	}
+	if envImage := strings.TrimSpace(os.Getenv("UPDATE_DOCKER_IMAGE")); envImage != "" {
+		return envImage
+	}
+	if strings.EqualFold(strings.TrimSpace(repository), tuavaGitHubRepo) {
+		return "ghcr.io/tuava/sub2api"
+	}
+	return "weishaw/sub2api"
 }
 
 // UpdateInfo contains update information
@@ -119,8 +176,11 @@ type GitHubRelease struct {
 // RollbackVersion describes a release version the system can roll back to
 type RollbackVersion struct {
 	Version     string `json:"version"` // without "v" prefix, e.g. "0.1.146"
+	TagName     string `json:"tag_name"`
 	PublishedAt string `json:"published_at"`
 	HTMLURL     string `json:"html_url"`
+	Repository  string `json:"repository"`
+	DockerImage string `json:"docker_image"`
 }
 
 type GitHubAsset struct {
@@ -316,8 +376,11 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 	for _, r := range releases {
 		versions = append(versions, RollbackVersion{
 			Version:     strings.TrimPrefix(r.TagName, "v"),
+			TagName:     r.TagName,
 			PublishedAt: r.PublishedAt,
 			HTMLURL:     r.HTMLURL,
+			Repository:  s.githubRepo,
+			DockerImage: s.dockerImage,
 		})
 	}
 	return versions, nil
@@ -363,9 +426,17 @@ func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) e
 // fetchRollbackCandidates fetches recent releases and keeps the newest
 // maxRollbackVersions entries strictly older than the current version.
 func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubRelease, error) {
-	releases, err := s.githubClient.FetchRecentReleases(ctx, githubRepo, rollbackFetchPageSize)
+	s.rollbackMu.Lock()
+	defer s.rollbackMu.Unlock()
+	if len(s.rollbackCache) > 0 && time.Since(s.rollbackCached) < rollbackCacheTTL {
+		return append([]*GitHubRelease(nil), s.rollbackCache...), nil
+	}
+	releases, err := s.githubClient.FetchRecentReleases(ctx, s.githubRepo, rollbackFetchPageSize)
 	if err != nil {
-		return nil, err
+		if len(s.rollbackCache) > 0 {
+			return append([]*GitHubRelease(nil), s.rollbackCache...), nil
+		}
+		return nil, normalizeGitHubReleaseFetchError(err, s.githubRepo)
 	}
 
 	seen := make(map[string]bool, len(releases))
@@ -396,11 +467,34 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 	if len(candidates) > maxRollbackVersions {
 		candidates = candidates[:maxRollbackVersions]
 	}
+	s.rollbackCache = append([]*GitHubRelease(nil), candidates...)
+	s.rollbackCached = time.Now()
 	return candidates, nil
 }
 
+func normalizeGitHubReleaseFetchError(err error, repository string) error {
+	metadata := map[string]string{"repository": repository, "fallback": "atom"}
+	message := "GitHub release list is unavailable"
+	var details GitHubAPIErrorDetails
+	if errors.As(err, &details) {
+		metadata["api_status"] = strconv.Itoa(details.GitHubAPIStatus())
+		metadata["rate_limit_remaining"] = details.GitHubRateLimitRemaining()
+		metadata["token_configured"] = strconv.FormatBool(details.GitHubTokenConfigured())
+		if resetUnix := details.GitHubRateLimitResetUnix(); resetUnix > 0 {
+			metadata["rate_limit_reset_at"] = time.Unix(resetUnix, 0).UTC().Format(time.RFC3339)
+		}
+		if details.GitHubAPIStatus() == http.StatusForbidden && details.GitHubRateLimitRemaining() == "0" {
+			metadata["rate_limited"] = "true"
+			message = "GitHub release API rate limit exceeded and Atom fallback failed"
+		}
+	}
+	return infraerrors.New(http.StatusServiceUnavailable, "GITHUB_RELEASES_UNAVAILABLE", message).
+		WithMetadata(metadata).
+		WithCause(err)
+}
+
 func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {
-	release, err := s.githubClient.FetchLatestRelease(ctx, githubRepo)
+	release, err := s.githubClient.FetchLatestRelease(ctx, s.githubRepo)
 	if err != nil {
 		return nil, err
 	}
@@ -603,6 +697,7 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
+		Repository  string       `json:"repository"`
 	}
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
 		return nil, err
@@ -610,6 +705,10 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 
 	if time.Now().Unix()-cached.Timestamp > updateCacheTTL {
 		return nil, fmt.Errorf("cache expired")
+	}
+	if (cached.Repository == "" && !strings.EqualFold(s.githubRepo, defaultGitHubRepo)) ||
+		(cached.Repository != "" && !strings.EqualFold(cached.Repository, s.githubRepo)) {
+		return nil, fmt.Errorf("cache belongs to another release repository")
 	}
 
 	return &UpdateInfo{
@@ -627,10 +726,12 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
+		Repository  string       `json:"repository"`
 	}{
 		Latest:      info.LatestVersion,
 		ReleaseInfo: info.ReleaseInfo,
 		Timestamp:   time.Now().Unix(),
+		Repository:  s.githubRepo,
 	}
 
 	data, _ := json.Marshal(cacheData)
@@ -639,6 +740,11 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 
 // compareVersions compares two semantic versions
 func compareVersions(current, latest string) int {
+	currentSemver := normalizeSemanticVersion(current)
+	latestSemver := normalizeSemanticVersion(latest)
+	if semver.IsValid(currentSemver) && semver.IsValid(latestSemver) {
+		return semver.Compare(currentSemver, latestSemver)
+	}
 	currentParts := parseVersion(current)
 	latestParts := parseVersion(latest)
 
@@ -651,6 +757,17 @@ func compareVersions(current, latest string) int {
 		}
 	}
 	return 0
+}
+
+func normalizeSemanticVersion(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "v") {
+		value = "v" + value
+	}
+	return value
 }
 
 func parseVersion(v string) [3]int {

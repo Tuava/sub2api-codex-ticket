@@ -7,7 +7,7 @@ TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
 cat > "$TEMP_DIR/curl" <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 printf '%s\n' "$@" > "$CURL_ARGS_LOG"
 env > "${CURL_ARGS_LOG}.env"
 cat > "${CURL_ARGS_LOG}.stdin"
@@ -22,8 +22,8 @@ EOF
 
 run_api_curl() {
     CURL_ARGS_LOG="$1" HOME="$TEMP_DIR/home" PATH="$TEMP_DIR:$PATH" UPDATE_GITHUB_TOKEN="${2:-}" \
-        GITHUB_TOKEN="github-fallback" GH_TOKEN="gh-fallback" \
-        bash -c 'source <(head -n -1 "$1"); github_api_curl -s "$2"' bash \
+        GITHUB_TOKEN="${3:-}" GH_TOKEN="${4:-}" \
+        bash -c 'source <(sed -e "\$d" "$1"); github_api_curl -s "$2"' bash \
         "$ROOT_DIR/deploy/install.sh" "https://api.github.com/repos/Wei-Shaw/sub2api/releases/latest"
 }
 
@@ -48,16 +48,22 @@ if grep -Fq 'example.com/collect' "$TEMP_DIR/authenticated" || grep -Fq 'X-Leake
     exit 1
 fi
 
+run_api_curl "$TEMP_DIR/fallback" "" "github-fallback" "gh-fallback"
+test "$(head -n 1 "$TEMP_DIR/fallback")" = '-q'
+grep -Fxq -- '--config' "$TEMP_DIR/fallback"
+grep -Fxq 'header = "Authorization: Bearer github-fallback"' "$TEMP_DIR/fallback.stdin"
+if grep -Eq 'github-fallback|gh-fallback' "$TEMP_DIR/fallback.env"; then
+    echo "installer exposed a fallback token in curl environment" >&2
+    exit 1
+fi
+if grep -Eq 'github-fallback|gh-fallback' "$TEMP_DIR/fallback"; then
+    echo "installer exposed a fallback token in curl argv" >&2
+    exit 1
+fi
+test "$(grep -Fxc 'https://api.github.com/repos/Wei-Shaw/sub2api/releases/latest' "$TEMP_DIR/fallback")" -eq 1
+
 run_api_curl "$TEMP_DIR/anonymous"
 test "$(head -n 1 "$TEMP_DIR/anonymous")" = '-q'
-if grep -Eq 'github-fallback|gh-fallback' "$TEMP_DIR/anonymous.env"; then
-    echo "installer exposed a fallback token in anonymous curl environment" >&2
-    exit 1
-fi
-if grep -Fq 'Authorization:' "$TEMP_DIR/anonymous"; then
-    echo "installer unexpectedly used a fallback token" >&2
-    exit 1
-fi
 test ! -s "$TEMP_DIR/anonymous.stdin"
 test "$(grep -Fxc 'https://api.github.com/repos/Wei-Shaw/sub2api/releases/latest' "$TEMP_DIR/anonymous")" -eq 1
 if grep -Fq 'example.com/collect' "$TEMP_DIR/anonymous" || grep -Fq 'X-Leaked-From-Curlrc' "$TEMP_DIR/anonymous"; then
@@ -70,7 +76,7 @@ assert_unsafe_invocation_rejected() {
     shift
     rm -f "$TEMP_DIR/$name" "$TEMP_DIR/$name.stdin"
     if CURL_ARGS_LOG="$TEMP_DIR/$name" PATH="$TEMP_DIR:$PATH" UPDATE_GITHUB_TOKEN="update-secret" \
-        bash -c 'source <(head -n -1 "$1"); shift; github_api_curl "$@"' bash \
+        bash -c 'source <(sed -e "\$d" "$1"); shift; github_api_curl "$@"' bash \
         "$ROOT_DIR/deploy/install.sh" "$@" 2>/dev/null; then
         echo "installer accepted unsafe curl invocation: $name" >&2
         exit 1
@@ -99,5 +105,8 @@ test "$(grep -c 'github_api_curl .*https://api.github.com/' "$ROOT_DIR/deploy/in
 # Asset and checksum downloads must continue to call curl directly.
 grep -Fq 'curl -sL "$download_url"' "$ROOT_DIR/deploy/install.sh"
 grep -Fq 'curl -sL "$checksum_url"' "$ROOT_DIR/deploy/install.sh"
+
+# API failures must fall back to the public Atom feed without credentials.
+grep -Fq 'https://github.com/${GITHUB_REPO}/releases.atom' "$ROOT_DIR/deploy/install.sh"
 
 echo "install GitHub token checks passed"

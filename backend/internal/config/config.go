@@ -176,6 +176,11 @@ type UpdateConfig struct {
 	// 支持 http/https/socks5/socks5h 协议
 	// 例如: "http://127.0.0.1:7890", "socks5://127.0.0.1:1080"
 	ProxyURL string `mapstructure:"proxy_url"`
+	// Repository is the GitHub owner/repository used for update and rollback releases.
+	// Empty selects the customized repository for -tuava builds and upstream otherwise.
+	Repository string `mapstructure:"repository"`
+	// DockerImage is shown in rollback instructions. Empty is derived from Repository.
+	DockerImage string `mapstructure:"docker_image"`
 }
 
 type IdempotencyConfig struct {
@@ -2626,6 +2631,8 @@ func setEnvReachableDefaults() {
 	viper.SetDefault("gateway.session_idle_timeout_minutes", 0)
 	viper.SetDefault("gateway.user_message_queue.mode", "")
 	viper.SetDefault("update.proxy_url", "")
+	viper.SetDefault("update.repository", "")
+	viper.SetDefault("update.docker_image", "")
 
 	// sticky_escape_enabled is the one exception to the zero-value rule: its
 	// effective default is true, applied post-unmarshal via a viper.IsSet guard.

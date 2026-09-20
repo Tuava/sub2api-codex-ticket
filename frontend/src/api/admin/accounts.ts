@@ -256,10 +256,80 @@ export async function update(id: number, updates: UpdateAccountRequest): Promise
   return data
 }
 
-export async function probeCodexTicket(id: number, model: string): Promise<{ model: string; tickets: NonNullable<Account['codex_turn_tickets']> }> {
-  const { data } = await apiClient.post<{ model: string; tickets: NonNullable<Account['codex_turn_tickets']> }>(
+export async function probeCodexTicket(
+  id: number,
+  model: string,
+  operationId: string,
+  policy?: {
+    enabled: boolean
+    target_mode: 'auto' | 'manual'
+    target_length: number
+    missing_policy: 'pause' | 'allow'
+  }
+): Promise<{
+  model: string
+  operation_id: string
+  result?: {
+    attempted: boolean
+    outcome: string
+    http_status?: number
+    observed_length?: number
+    target_length: number
+    ready: boolean
+  }
+  tickets: NonNullable<Account['codex_turn_tickets']>
+}> {
+  const { data } = await apiClient.post<{
+    model: string
+    operation_id: string
+    result?: {
+      attempted: boolean
+      outcome: string
+      http_status?: number
+      observed_length?: number
+      target_length: number
+      ready: boolean
+    }
+    tickets: NonNullable<Account['codex_turn_tickets']>
+  }>(
     `/admin/accounts/${id}/codex-ticket/probe`,
-    { model }
+    { model, policy, operation_id: operationId },
+    { timeout: 90000 }
+  )
+  return data
+}
+
+export interface CodexTicketProbeProgressLog {
+  at: string
+  level: 'info' | 'success' | 'error' | string
+  event: string
+  metadata?: Record<string, string>
+}
+
+export interface CodexTicketProbeProgress {
+  operation_id: string
+  account_id: number
+  model: string
+  status: 'running' | 'completed' | 'failed'
+  stage: string
+  percent: number
+  started_at: string
+  updated_at: string
+  completed_at?: string
+  elapsed_ms: number
+  outcome?: string
+  http_status?: number
+  observed_length?: number
+  target_length?: number
+  ready: boolean
+  error_code?: string
+  error_message?: string
+  logs: CodexTicketProbeProgressLog[]
+}
+
+export async function getCodexTicketProbeProgress(id: number, operationId: string): Promise<CodexTicketProbeProgress> {
+  const { data } = await apiClient.get<CodexTicketProbeProgress>(
+    `/admin/accounts/${id}/codex-ticket/probe/${operationId}`
   )
   return data
 }
@@ -752,6 +822,7 @@ export async function exportData(options?: {
     sort_order?: 'asc' | 'desc'
   }
   includeProxies?: boolean
+  includeTicketInfo?: boolean
 }): Promise<AdminDataPayload> {
   const params: Record<string, string> = {}
   if (options?.ids && options.ids.length > 0) {
@@ -770,6 +841,9 @@ export async function exportData(options?: {
   if (options?.includeProxies === false) {
     params.include_proxies = 'false'
   }
+  // Account backups are lossless by default. Only an explicit opt-out may
+  // omit the original Codex ticket values.
+  params.include_ticket_info = options?.includeTicketInfo === false ? 'false' : 'true'
   const { data } = await apiClient.get<AdminDataPayload>('/admin/accounts/data', { params })
   return data
 }
@@ -1121,6 +1195,7 @@ export const accountsAPI = {
   duplicate,
   update,
   probeCodexTicket,
+  getCodexTicketProbeProgress,
   getGrokMediaEligibility,
   updateGrokMediaEligibility,
   checkMixedChannelRisk,

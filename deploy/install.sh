@@ -31,11 +31,16 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-GITHUB_REPO="Wei-Shaw/sub2api"
+GITHUB_REPO="${GITHUB_REPO:-Wei-Shaw/sub2api}"
 INSTALL_DIR="/opt/sub2api"
 SERVICE_NAME="sub2api"
 SERVICE_USER="sub2api"
 CONFIG_DIR="/etc/sub2api"
+
+if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Invalid GITHUB_REPO: expected owner/repository" >&2
+    exit 1
+fi
 
 # Server configuration (will be set by user)
 SERVER_HOST="0.0.0.0"
@@ -517,21 +522,35 @@ github_api_curl() {
         return 2
     fi
 
-    if [ -n "${UPDATE_GITHUB_TOKEN:-}" ]; then
-        if [[ "$UPDATE_GITHUB_TOKEN" == *$'\n'* || "$UPDATE_GITHUB_TOKEN" == *$'\r'* || "$UPDATE_GITHUB_TOKEN" == *'"'* || "$UPDATE_GITHUB_TOKEN" == *'\'* ]]; then
-            echo "UPDATE_GITHUB_TOKEN contains unsupported characters" >&2
+    local github_token="${UPDATE_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
+    if [ -n "$github_token" ]; then
+        if [[ "$github_token" == *$'\n'* || "$github_token" == *$'\r'* || "$github_token" == *'"'* || "$github_token" == *'\'* ]]; then
+            echo "GitHub API token contains unsupported characters" >&2
             return 2
         fi
-        printf 'header = "Authorization: Bearer %s"\n' "$UPDATE_GITHUB_TOKEN" | UPDATE_GITHUB_TOKEN= GITHUB_TOKEN= GH_TOKEN= curl -q --globoff --config - "$@"
+        printf 'header = "Authorization: Bearer %s"\n' "$github_token" | UPDATE_GITHUB_TOKEN= GITHUB_TOKEN= GH_TOKEN= curl -q --globoff --config - "$@"
     else
         UPDATE_GITHUB_TOKEN= GITHUB_TOKEN= GH_TOKEN= curl -q --globoff "$@"
     fi
 }
 
+# Releases Atom is public and does not consume the REST API quota. It is used
+# when GitHub answers 403/429 or the API is otherwise unavailable.
+github_atom_versions() {
+    curl -q --globoff -fsSL --connect-timeout 10 --max-time 30 \
+        "https://github.com/${GITHUB_REPO}/releases.atom" 2>/dev/null |
+        sed -n 's|.*href="https://github.com/[^/]*/[^/]*/releases/tag/\([^"]*\)".*|\1|p' |
+        awk '!seen[$0]++'
+}
+
 # Get latest release version
 get_latest_version() {
     print_info "$(msg 'fetching_version')"
-    LATEST_VERSION=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    LATEST_VERSION=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+
+    if [ -z "$LATEST_VERSION" ]; then
+        LATEST_VERSION=$(github_atom_versions | head -1)
+    fi
 
     if [ -z "$LATEST_VERSION" ]; then
         print_error "$(msg 'failed_get_version')"
@@ -547,7 +566,11 @@ list_versions() {
     print_info "$(msg 'fetching_versions')"
 
     local versions
-    versions=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | head -20)
+    versions=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | head -20 || true)
+
+    if [ -z "$versions" ]; then
+        versions=$(github_atom_versions | head -20)
+    fi
 
     if [ -z "$versions" ]; then
         print_error "$(msg 'failed_get_version')"
@@ -580,19 +603,27 @@ validate_version() {
         version="v$version"
     fi
 
+    if [[ ! "$version" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+        print_error "$(msg 'version_not_found'): $version" >&2
+        exit 1
+    fi
+
     print_info "$(msg 'validating_version') $version" >&2
 
     # Check if the release exists
     local http_code
     http_code=$(github_api_curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${version}" 2>/dev/null)
 
-    # Check for network errors (empty or non-numeric response)
-    if [ -z "$http_code" ] || ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
-        print_error "Network error: Failed to connect to GitHub API" >&2
-        exit 1
-    fi
-
     if [ "$http_code" != "200" ]; then
+        if github_atom_versions | grep -Fxq "$version"; then
+            echo "$version"
+            return 0
+        fi
+        # Check for network errors only after the public Atom fallback.
+        if [ -z "$http_code" ] || ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+            print_error "Network error: Failed to connect to GitHub API and releases Atom" >&2
+            exit 1
+        fi
         print_error "$(msg 'version_not_found'): $version" >&2
         echo "" >&2
         list_versions >&2

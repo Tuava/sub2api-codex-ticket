@@ -2275,38 +2275,132 @@
       <!-- Codex Turn State 门票策略与状态（仅 OpenAI OAuth/SetupToken） -->
       <div
         v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token')"
-        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+        class="border-t border-gray-200 pt-5 dark:border-dark-600"
       >
-        <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicket') }}</label>
-        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-          {{ t('admin.accounts.openai.codexTurnTicketDesc') }}
-        </p>
-        <div class="mt-3 space-y-2">
-          <div v-for="ticket in codexTurnTickets" :key="ticket.model" class="rounded-md bg-gray-50 px-3 py-2 text-sm dark:bg-dark-700">
-            <div class="flex items-center justify-between gap-3">
-              <span class="font-medium">{{ ticket.model }}</span>
-              <span :class="codexTicketStatusClass(ticket)">{{ codexTicketStatusLabel(ticket) }}</span>
-            </div>
-            <div class="mt-2 grid gap-2 sm:grid-cols-[auto_1fr_1fr_auto]">
-              <Toggle :id="`codex-ticket-${ticket.model}-enabled`" v-model="codexTicketModelSettings[ticket.model].enabled" />
-              <Select v-model="codexTicketModelSettings[ticket.model].target_mode" :options="codexTicketTargetModeOptions" />
-              <input v-model.number="codexTicketModelSettings[ticket.model].target_length" type="number" min="128" max="2048" class="input w-full" :disabled="codexTicketModelSettings[ticket.model].target_mode !== 'manual'" />
-              <Select v-model="codexTicketModelSettings[ticket.model].missing_policy" :options="codexTicketMissingPolicyOptions" />
-              <button type="button" class="btn-secondary whitespace-nowrap" :disabled="codexTicketProbeLoading[ticket.model]" @click="probeCodexTicket(ticket.model)">
+        <div class="flex items-start gap-3">
+          <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-300">
+            <Icon name="bolt" size="sm" />
+          </div>
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicket') }}</label>
+            <p class="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.codexTurnTicketDesc') }}
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-4 space-y-4">
+          <section
+            v-for="ticket in codexTicketRows"
+            :key="ticket.model"
+            class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-dark-600 dark:bg-dark-800"
+            :data-testid="`codex-ticket-card-${ticket.model}`"
+          >
+            <div class="flex flex-col gap-3 border-b border-gray-100 bg-gray-50/70 px-4 py-3 dark:border-dark-700 dark:bg-dark-700/40 sm:flex-row sm:items-center sm:justify-between">
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-mono text-sm font-semibold text-gray-900 dark:text-white">{{ ticket.model }}</span>
+                  <span
+                    class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                    :class="codexTicketStatusBadgeClass(ticket)"
+                  >
+                    <span class="h-1.5 w-1.5 rounded-full" :class="codexTicketStatusDotClass(ticket)" />
+                    {{ codexTicketStatusLabel(ticket) }}
+                  </span>
+                </div>
+                <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.openai.codexTicketStatusDetail', {
+                    target: ticket.target_length,
+                    current: codexTicketCurrentLength(ticket),
+                    policy: ticket.missing_policy === 'pause'
+                      ? t('admin.accounts.openai.codexTicketPolicyPauseShort')
+                      : t('admin.accounts.openai.codexTicketPolicyAllowShort')
+                  }) }}
+                  <span v-if="ticket.next_probe_at"> · {{ t('admin.accounts.openai.codexTicketNextProbe', { time: formatDateTime(ticket.next_probe_at) }) }}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500/40 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 disabled:shadow-none dark:disabled:bg-dark-600 dark:disabled:text-gray-400"
+                :disabled="codexTicketProbeLoading[ticket.model] || !codexTicketModelSettings[ticket.model]?.enabled"
+                :data-testid="`codex-ticket-probe-${ticket.model}`"
+                @click="probeCodexTicket(ticket.model)"
+              >
+                <Icon name="refresh" size="sm" :class="codexTicketProbeLoading[ticket.model] && 'animate-spin'" />
                 {{ codexTicketProbeLoading[ticket.model] ? t('admin.accounts.openai.codexTicketProbing') : t('admin.accounts.openai.codexTicketProbeNow') }}
               </button>
             </div>
-            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {{ t('admin.accounts.openai.codexTicketStatusDetail', {
-                target: ticket.target_length,
-                current: codexTicketCurrentLength(ticket),
-                policy: ticket.missing_policy === 'pause'
-                  ? t('admin.accounts.openai.codexTicketPolicyPauseShort')
-                  : t('admin.accounts.openai.codexTicketPolicyAllowShort')
-              }) }}
-              <span v-if="ticket.next_probe_at"> · {{ t('admin.accounts.openai.codexTicketNextProbe', { time: formatDateTime(ticket.next_probe_at) }) }}</span>
+
+            <div class="p-4">
+              <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+                  <div class="text-[11px] font-medium text-gray-500 dark:text-gray-400">{{ t('common.enabled') }}</div>
+                  <div class="mt-2 flex items-center justify-between gap-3">
+                    <span class="text-xs text-gray-700 dark:text-gray-200">{{ codexTicketModelSettings[ticket.model]?.enabled ? t('common.yes') : t('common.no') }}</span>
+                    <Toggle :id="`codex-ticket-${ticket.model}-enabled`" v-model="codexTicketModelSettings[ticket.model].enabled" />
+                  </div>
+                </div>
+                <label class="block rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+                  <span class="text-[11px] font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.codexTicketTargetMode') }}</span>
+                  <Select class="mt-2" v-model="codexTicketModelSettings[ticket.model].target_mode" :options="codexTicketTargetModeOptions" />
+                </label>
+                <label class="block rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+                  <span class="text-[11px] font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.codexTicketTargetLength') }}</span>
+                  <input v-model.number="codexTicketModelSettings[ticket.model].target_length" type="number" min="128" max="2048" class="input mt-2 w-full" :disabled="codexTicketModelSettings[ticket.model].target_mode !== 'manual'" />
+                </label>
+                <label class="block rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+                  <span class="text-[11px] font-medium text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.codexTicketMissingPolicy') }}</span>
+                  <Select class="mt-2" v-model="codexTicketModelSettings[ticket.model].missing_policy" :options="codexTicketMissingPolicyOptions" />
+                </label>
+              </div>
+
+              <div
+                v-if="codexTicketProbeProgress[ticket.model]"
+                class="mt-4 overflow-hidden rounded-xl border border-slate-700 bg-slate-950 text-slate-100 shadow-inner"
+                :data-testid="`codex-ticket-progress-${ticket.model}`"
+              >
+                <div class="border-b border-slate-800 px-4 py-3">
+                  <div class="flex items-center justify-between gap-3 text-xs">
+                    <div class="flex min-w-0 items-center gap-2">
+                      <span class="relative flex h-2.5 w-2.5 shrink-0">
+                        <span v-if="codexTicketProbeProgress[ticket.model]?.status === 'running'" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-60" />
+                        <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="codexTicketProgressDotClass(ticket.model)" />
+                      </span>
+                      <span class="truncate font-semibold">{{ codexTicketProgressStageLabel(ticket.model) }}</span>
+                    </div>
+                    <div class="shrink-0 font-mono text-slate-400">
+                      {{ codexTicketProbeProgress[ticket.model]?.percent || 0 }}% · {{ formatCodexTicketProbeElapsed(ticket.model) }}
+                    </div>
+                  </div>
+                  <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      class="h-full rounded-full transition-all duration-300"
+                      :class="codexTicketProgressBarClass(ticket.model)"
+                      :style="{ width: `${codexTicketProbeProgress[ticket.model]?.percent || 0}%` }"
+                    />
+                  </div>
+                  <div v-if="codexTicketProbeProgress[ticket.model]?.http_status" class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-400">
+                    <span class="rounded bg-slate-800 px-2 py-1">HTTP {{ codexTicketProbeProgress[ticket.model]?.http_status }}</span>
+                    <span class="rounded bg-slate-800 px-2 py-1">LEN {{ codexTicketProbeProgress[ticket.model]?.observed_length || 0 }}/{{ codexTicketProbeProgress[ticket.model]?.target_length || ticket.target_length }}</span>
+                    <span v-if="codexTicketProbeProgress[ticket.model]?.outcome" class="rounded bg-slate-800 px-2 py-1">{{ codexTicketProbeProgress[ticket.model]?.outcome }}</span>
+                  </div>
+                </div>
+                <div class="max-h-44 space-y-1 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-5">
+                  <div
+                    v-for="(entry, index) in codexTicketProbeProgress[ticket.model]?.logs || []"
+                    :key="`${entry.at}-${index}`"
+                    class="grid grid-cols-[68px_10px_1fr] gap-2"
+                  >
+                    <span class="text-slate-500">{{ formatCodexTicketLogTime(entry.at) }}</span>
+                    <span :class="codexTicketLogLevelClass(entry.level)">●</span>
+                    <span class="min-w-0 break-words" :class="entry.level === 'error' ? 'text-rose-300' : entry.level === 'success' ? 'text-emerald-300' : 'text-slate-300'">
+                      {{ codexTicketProbeLogLabel(entry) }}
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
+          </section>
         </div>
       </div>
 
@@ -3078,11 +3172,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 
 import { adminAPI } from '@/api/admin'
+import type { CodexTicketProbeProgress, CodexTicketProbeProgressLog } from '@/api/admin/accounts'
 import { useQuotaNotifyState } from '@/composables/useQuotaNotifyState'
 import type {
   Account,
@@ -3188,6 +3283,7 @@ const props = defineProps<Props>()
 const emit = defineEmits<{
   close: []
   updated: [account: Account]
+  'ticket-updated': [accountID: number, tickets: NonNullable<Account['codex_turn_tickets']>]
 }>()
 
 const { t } = useI18n()
@@ -3209,7 +3305,8 @@ const selectableGroups = computed(() => {
 // 故隐藏代理选择器。
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 
-const codexTurnTickets = computed(() => props.account?.codex_turn_tickets ?? [])
+const codexTurnTickets = ref<NonNullable<Account['codex_turn_tickets']>>([])
+const CODEX_TICKET_MODELS = ['gpt-6-astra', 'gpt-5.6-sol'] as const
 
 type CodexTicketModelSetting = {
   enabled: boolean
@@ -3223,8 +3320,40 @@ const codexTicketModelSettings = reactive<Record<string, CodexTicketModelSetting
   'gpt-5.6-sol': { enabled: true, target_mode: 'auto', target_length: 332, missing_policy: 'allow' },
 })
 const codexTicketProbeLoading = reactive<Record<string, boolean>>({})
+const codexTicketProbeProgress = reactive<Record<string, CodexTicketProbeProgress | undefined>>({})
+const codexTicketProbeOperation = reactive<Record<string, string | undefined>>({})
+const codexTicketProbePollTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 type CodexTicketStatus = NonNullable<Account['codex_turn_tickets']>[number]
+
+const codexTicketRows = computed<CodexTicketStatus[]>(() => {
+  const byModel = new Map(codexTurnTickets.value.map((ticket) => [ticket.model, ticket]))
+  const models = Array.from(new Set([
+    ...CODEX_TICKET_MODELS,
+    ...codexTurnTickets.value.map((ticket) => ticket.model)
+  ]))
+  return models.map((model) => {
+    const current = byModel.get(model)
+    if (current) return current
+    const setting = codexTicketModelSettings[model] || {
+      enabled: true,
+      target_mode: 'auto' as CodexTicketTargetMode,
+      target_length: 332,
+      missing_policy: 'allow' as CodexTicketMissingPolicy
+    }
+    return {
+      model,
+      ticket_type: setting.enabled ? 'missing' : 'disabled',
+      target_length: setting.target_length,
+      target_mode: setting.target_mode,
+      target_source: setting.target_mode === 'manual' ? 'manual' : 'global_default',
+      missing_policy: setting.missing_policy,
+      ready: false,
+      remaining_seconds: 0,
+      blocked: setting.missing_policy === 'pause'
+    }
+  })
+})
 
 function formatCodexTicketRemaining(seconds: number) {
   const total = Math.max(0, Math.floor(seconds || 0))
@@ -3262,24 +3391,212 @@ function codexTicketCurrentLength(ticket: CodexTicketStatus) {
     : ticket.observed_length || ticket.length || '-'
 }
 
-function codexTicketStatusClass(ticket: CodexTicketStatus) {
-  if (ticket.ready) return 'text-emerald-600 dark:text-emerald-400'
+function codexTicketStatusBadgeClass(ticket: CodexTicketStatus) {
+  if (ticket.ready) return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/35 dark:text-emerald-300'
   if (ticket.ticket_type === 'rate_limited' || ticket.ticket_type === 'quota_exhausted') {
-    return 'text-red-600 dark:text-red-400'
+    return 'bg-rose-100 text-rose-700 dark:bg-rose-900/35 dark:text-rose-300'
   }
-  if (ticket.blocked) return 'text-amber-600 dark:text-amber-400'
-  return 'text-gray-500'
+  if (ticket.ticket_type === 'error' || ticket.ticket_type === 'http_error' || ticket.ticket_type === 'token_error') {
+    return 'bg-orange-100 text-orange-700 dark:bg-orange-900/35 dark:text-orange-300'
+  }
+  if (ticket.blocked) return 'bg-amber-100 text-amber-700 dark:bg-amber-900/35 dark:text-amber-300'
+  return 'bg-gray-100 text-gray-600 dark:bg-dark-600 dark:text-gray-300'
+}
+
+function codexTicketStatusDotClass(ticket: CodexTicketStatus) {
+  if (ticket.ready) return 'bg-emerald-500'
+  if (ticket.ticket_type === 'rate_limited' || ticket.ticket_type === 'quota_exhausted') return 'bg-rose-500'
+  if (ticket.ticket_type === 'error' || ticket.ticket_type === 'http_error' || ticket.ticket_type === 'token_error') return 'bg-orange-500'
+  if (ticket.blocked) return 'bg-amber-500'
+  return 'bg-gray-400'
+}
+
+function makeCodexTicketOperationID() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16)
+    const value = char === 'x' ? random : (random & 0x3) | 0x8
+    return value.toString(16)
+  })
+}
+
+function clearCodexTicketProbePoll(model: string) {
+  const timer = codexTicketProbePollTimers.get(model)
+  if (timer) clearTimeout(timer)
+  codexTicketProbePollTimers.delete(model)
+}
+
+function clearAllCodexTicketProbePolls() {
+  for (const model of codexTicketProbePollTimers.keys()) clearCodexTicketProbePoll(model)
+}
+
+function initialCodexTicketProbeProgress(accountID: number, model: string, operationID: string): CodexTicketProbeProgress {
+  const now = new Date().toISOString()
+  return {
+    operation_id: operationID,
+    account_id: accountID,
+    model,
+    status: 'running',
+    stage: 'queued',
+    percent: 1,
+    started_at: now,
+    updated_at: now,
+    elapsed_ms: 0,
+    ready: false,
+    logs: [{ at: now, level: 'info', event: 'probe_queued' }]
+  }
+}
+
+async function pollCodexTicketProbeProgress(accountID: number, model: string, operationID: string) {
+  if (codexTicketProbeOperation[model] !== operationID) return
+  try {
+    const progress = await adminAPI.accounts.getCodexTicketProbeProgress(accountID, operationID)
+    if (codexTicketProbeOperation[model] !== operationID) return
+    codexTicketProbeProgress[model] = progress
+    if (progress.status !== 'running') {
+      clearCodexTicketProbePoll(model)
+      return
+    }
+  } catch {
+    // The first poll can race the POST before the server registers operation_id.
+    // Keep the local queued state and retry; the POST error path supplies the
+    // final visible failure if registration never succeeds.
+  }
+  clearCodexTicketProbePoll(model)
+  codexTicketProbePollTimers.set(model, setTimeout(() => {
+    void pollCodexTicketProbeProgress(accountID, model, operationID)
+  }, 300))
+}
+
+async function fetchFinalCodexTicketProbeProgress(accountID: number, model: string, operationID: string) {
+  try {
+    const progress = await adminAPI.accounts.getCodexTicketProbeProgress(accountID, operationID)
+    if (codexTicketProbeOperation[model] === operationID) codexTicketProbeProgress[model] = progress
+  } catch {
+    // Preserve the last server progress or the local fallback assembled below.
+  }
+}
+
+function codexTicketProgressStageLabel(model: string) {
+  const stage = codexTicketProbeProgress[model]?.stage || 'queued'
+  return t(`admin.accounts.openai.codexTicketProbeStage.${stage}`)
+}
+
+function codexTicketProgressDotClass(model: string) {
+  const status = codexTicketProbeProgress[model]?.status
+  if (status === 'completed') return 'bg-emerald-400'
+  if (status === 'failed') return 'bg-rose-400'
+  return 'bg-cyan-400'
+}
+
+function codexTicketProgressBarClass(model: string) {
+  const status = codexTicketProbeProgress[model]?.status
+  if (status === 'completed') return 'bg-emerald-500'
+  if (status === 'failed') return 'bg-rose-500'
+  return 'bg-gradient-to-r from-cyan-500 to-violet-500'
+}
+
+function formatCodexTicketProbeElapsed(model: string) {
+  const milliseconds = Math.max(0, codexTicketProbeProgress[model]?.elapsed_ms || 0)
+  return `${(milliseconds / 1000).toFixed(1)}s`
+}
+
+function formatCodexTicketLogTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '--:--:--'
+  return date.toLocaleTimeString([], { hour12: false })
+}
+
+function codexTicketLogLevelClass(level: string) {
+  if (level === 'success') return 'text-emerald-400'
+  if (level === 'error') return 'text-rose-400'
+  return 'text-cyan-400'
+}
+
+function codexTicketProbeLogLabel(entry: CodexTicketProbeProgressLog) {
+  const metadata = entry.metadata || {}
+  return t(`admin.accounts.openai.codexTicketProbeLog.${entry.event}`, metadata)
 }
 
 async function probeCodexTicket(model: string) {
   if (!props.account) return
+  const setting = codexTicketModelSettings[model]
+  if (!setting?.enabled) {
+    appStore.showError(t('admin.accounts.openai.codexTicketTypeDisabled'))
+    return
+  }
+  const targetLength = Math.trunc(Number(setting.target_length))
+  if (setting.target_mode === 'manual' && (!Number.isFinite(targetLength) || targetLength < 128 || targetLength > 2048)) {
+    appStore.showError(t('admin.accounts.openai.codexTicketTargetLengthInvalid'))
+    return
+  }
+  const operationID = makeCodexTicketOperationID()
+  codexTicketProbeOperation[model] = operationID
+  clearCodexTicketProbePoll(model)
+  codexTicketProbeProgress[model] = initialCodexTicketProbeProgress(props.account.id, model, operationID)
   codexTicketProbeLoading[model] = true
+  codexTicketProbePollTimers.set(model, setTimeout(() => {
+    void pollCodexTicketProbeProgress(props.account!.id, model, operationID)
+  }, 100))
   try {
-    const result = await adminAPI.accounts.probeCodexTicket(props.account.id, model)
-    emit('updated', { ...props.account, codex_turn_tickets: result.tickets })
+    const response = await adminAPI.accounts.probeCodexTicket(props.account.id, model, operationID, {
+      enabled: setting.enabled,
+      target_mode: setting.target_mode,
+      target_length: Number.isFinite(targetLength) ? targetLength : 332,
+      missing_policy: setting.missing_policy
+    })
+    codexTurnTickets.value = response.tickets
+    emit('ticket-updated', props.account.id, response.tickets)
+
+    const result = response.result
+    const currentStatus = response.tickets.find((ticket) => ticket.model === model)
+    if (result?.ready || result?.outcome === 'target') {
+      appStore.showSuccess(t('admin.accounts.openai.codexTicketProbeSuccess', {
+        model,
+        length: result?.observed_length || result?.target_length || targetLength,
+        target: result?.target_length || targetLength
+      }))
+    } else if (result?.outcome === 'non_target') {
+      appStore.showInfo(currentStatus?.ready
+        ? t('admin.accounts.openai.codexTicketProbeNonTargetPreserved', { model })
+        : t('admin.accounts.openai.codexTicketProbeNonTarget', {
+            model,
+            current: result.observed_length || 0,
+            target: result.target_length || targetLength
+          }))
+    } else if (result?.outcome === 'rate_limited' || result?.outcome === 'quota_exhausted') {
+      appStore.showInfo(t('admin.accounts.openai.codexTicketProbeRateLimited', { model }))
+    } else {
+      appStore.showError(t('admin.accounts.openai.codexTicketProbeError', {
+        model,
+        reason: result?.outcome || t('admin.accounts.openai.codexTicketProbeFailed')
+      }))
+    }
   } catch (error: any) {
+    await fetchFinalCodexTicketProbeProgress(props.account.id, model, operationID)
+    const currentProgress = codexTicketProbeProgress[model]
+    if (!currentProgress || currentProgress.status === 'running') {
+      const now = new Date().toISOString()
+      codexTicketProbeProgress[model] = {
+        ...(currentProgress || initialCodexTicketProbeProgress(props.account.id, model, operationID)),
+        status: 'failed',
+        stage: 'failed',
+        percent: 100,
+        updated_at: now,
+        completed_at: now,
+        error_message: error?.message || t('admin.accounts.openai.codexTicketProbeFailed'),
+        logs: [
+          ...(currentProgress?.logs || []),
+          { at: now, level: 'error', event: 'probe_failed' }
+        ]
+      }
+    }
     appStore.showError(error?.message || t('admin.accounts.openai.codexTicketProbeFailed'))
   } finally {
+    await fetchFinalCodexTicketProbeProgress(props.account.id, model, operationID)
+    clearCodexTicketProbePoll(model)
     codexTicketProbeLoading[model] = false
   }
 }
@@ -4104,6 +4421,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   if (!newAccount) {
     return
   }
+  clearAllCodexTicketProbePolls()
+  for (const model of Object.keys(codexTicketProbeProgress)) delete codexTicketProbeProgress[model]
+  for (const model of Object.keys(codexTicketProbeOperation)) delete codexTicketProbeOperation[model]
   // 进入回填窗口：抑制 CN 模式/协议 watcher 联动重置 base_url（见 syncingForm 注释）。
   syncingForm.value = true
   void nextTick(() => {
@@ -4129,6 +4449,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     : 'active'
   form.group_ids = newAccount.group_ids || []
   form.expires_at = newAccount.expires_at ?? null
+  codexTurnTickets.value = [...(newAccount.codex_turn_tickets ?? [])]
 
   // Load intercept warmup requests setting (applies to all account types)
   const credentials = newAccount.credentials as Record<string, unknown> | undefined
@@ -4245,12 +4566,24 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       codexTicketMissingPolicy.value = extra?.codex_ticket_missing_policy === 'pause' ? 'pause' : 'allow'
       for (const model of ['gpt-6-astra', 'gpt-5.6-sol']) {
         const modelOverride = extra?.[`codex_ticket_policy:${model}`] as Record<string, unknown> | undefined
+        const ticketStatus = codexTurnTickets.value.find((ticket) => ticket.model === model)
         codexTicketModelSettings[model] = {
-          enabled: modelOverride?.enabled !== false,
-          target_mode: modelOverride?.codex_ticket_target_mode === 'manual' ? 'manual' : 'auto',
-          target_length: Number(modelOverride?.codex_ticket_target_length) || 332,
-          missing_policy: modelOverride?.codex_ticket_missing_policy === 'pause' ? 'pause' : 'allow'
+          enabled: modelOverride?.enabled !== false && ticketStatus?.ticket_type !== 'disabled',
+          target_mode: modelOverride?.codex_ticket_target_mode === 'manual' || ticketStatus?.target_mode === 'manual' ? 'manual' : 'auto',
+          target_length: Number(modelOverride?.codex_ticket_target_length) || ticketStatus?.target_length || 332,
+          missing_policy: modelOverride?.codex_ticket_missing_policy === 'pause' || ticketStatus?.missing_policy === 'pause' ? 'pause' : 'allow'
         }
+      }
+      for (const ticket of codexTurnTickets.value) {
+        if (!codexTicketModelSettings[ticket.model]) {
+          codexTicketModelSettings[ticket.model] = {
+            enabled: ticket.ticket_type !== 'disabled',
+            target_mode: ticket.target_mode === 'manual' ? 'manual' : 'auto',
+            target_length: ticket.target_length || 332,
+            missing_policy: ticket.missing_policy === 'pause' ? 'pause' : 'allow'
+          }
+        }
+        codexTicketProbeLoading[ticket.model] = false
       }
     }
     if (newAccount.type === 'oauth') {
@@ -4574,13 +4907,22 @@ watch(
     if (!show || !newAccount) {
       return
     }
-    if (!wasShow || newAccount !== previousAccount) {
+    // Background list refreshes replace the account object every few seconds.
+    // Re-initializing on reference changes wipes unsaved edits and briefly hides
+    // the ticket section. Only initialize when opening or switching account IDs.
+    if (!wasShow || newAccount.id !== previousAccount?.id) {
       syncFormFromAccount(newAccount)
       loadTLSProfiles()
     }
   },
   { immediate: true }
 )
+
+watch(() => props.show, (show) => {
+  if (!show) clearAllCodexTicketProbePolls()
+})
+
+onUnmounted(clearAllCodexTicketProbePolls)
 
 // Model mapping helpers
 const addModelMapping = () => {

@@ -47,8 +47,11 @@ export interface UpdateResult {
 
 export interface RollbackVersionInfo {
   version: string
+  tag_name?: string
   published_at: string
   html_url: string
+  repository?: string
+  docker_image?: string
 }
 
 /**

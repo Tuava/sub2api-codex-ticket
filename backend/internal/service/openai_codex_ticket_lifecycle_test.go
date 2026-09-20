@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -73,6 +74,13 @@ type codexTicketLifecycleRepo struct {
 	account Account
 	list    func(context.Context) ([]Account, error)
 	persist func(context.Context) error
+}
+
+func (r *codexTicketLifecycleRepo) GetByID(context.Context, int64) (*Account, error) {
+	copy := r.account
+	copy.Extra = maps.Clone(r.account.Extra)
+	copy.Credentials = maps.Clone(r.account.Credentials)
+	return &copy, nil
 }
 
 func (r *codexTicketLifecycleRepo) ListByPlatform(ctx context.Context, _ string) ([]Account, error) {

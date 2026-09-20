@@ -32,6 +32,28 @@
     <QuotaBadge v-if="showDailyQuota" :used="account.quota_daily_used ?? 0" :limit="account.quota_daily_limit!" label="D" />
     <QuotaBadge v-if="showWeeklyQuota" :used="account.quota_weekly_used ?? 0" :limit="account.quota_weekly_limit!" label="W" />
     <QuotaBadge v-if="showTotalQuota" :used="account.quota_used ?? 0" :limit="account.quota_limit!" />
+
+    <!-- Proxy lanes are part of capacity, not a separate account column. -->
+    <ProxyLanesCell
+      v-if="account.proxy_lanes?.length"
+      :account="account"
+      :proxies="proxies"
+      class="mt-1"
+    />
+    <div v-if="account.proxy_fallback_origin_id" class="mt-1 flex items-center gap-1">
+      <span
+        class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+        :title="t('admin.accounts.fallbackActiveTip', { origin: account.proxy_fallback_origin_name })"
+      >
+        {{ t('admin.accounts.fallbackActive') }}
+      </span>
+      <button
+        class="rounded border border-gray-300 px-1.5 py-0.5 text-[10px] text-gray-600 hover:bg-gray-100 dark:border-dark-600 dark:text-gray-300 dark:hover:bg-dark-700"
+        @click="emit('revert-proxy-fallback')"
+      >
+        {{ t('admin.accounts.revertProxy') }}
+      </button>
+    </div>
   </div>
 </template>
 
@@ -41,9 +63,15 @@ import { useI18n } from 'vue-i18n'
 import type { Account } from '@/types'
 import CapacityBadge from '@/components/account/CapacityBadge.vue'
 import QuotaBadge from '@/components/account/QuotaBadge.vue'
+import ProxyLanesCell from '@/components/account/ProxyLanesCell.vue'
 
 const props = defineProps<{
   account: Account
+  proxies?: Account['proxy_pool']
+}>()
+
+const emit = defineEmits<{
+  'revert-proxy-fallback': []
 }>()
 
 const { t } = useI18n()

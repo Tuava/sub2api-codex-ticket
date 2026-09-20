@@ -30,9 +30,32 @@ type DataPayload struct {
 	ExportedAt string        `json:"exported_at"`
 	Proxies    []DataProxy   `json:"proxies"`
 	Accounts   []DataAccount `json:"accounts"`
+	// TicketInfo is present only when the administrator explicitly requests
+	// ticket backup. Entries may contain the reusable ticket state.
+	TicketInfo []DataTicketInfo `json:"ticket_info,omitempty"`
 	// SkippedShadows 记录导出时被排除的 spark 影子账号数量(见 ExportData)。仅作可见性提示,
 	// 导入侧忽略该字段;omitempty 保持向后兼容。
 	SkippedShadows int `json:"skipped_shadows,omitempty"`
+}
+
+// DataTicket is the portable Codex ticket representation used by account
+// backup/import. A missing State is allowed for legacy metadata-only files;
+// those entries are displayed but are not written back as live tickets.
+type DataTicket struct {
+	Model      string     `json:"model"`
+	State      string     `json:"state,omitempty"`
+	Length     int        `json:"length,omitempty"`
+	CapturedAt *time.Time `json:"captured_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	Attempts   int        `json:"attempts,omitempty"`
+}
+
+type DataTicketInfo struct {
+	AccountIndex *int         `json:"account_index,omitempty"`
+	AccountName  string       `json:"account_name"`
+	Platform     string       `json:"platform"`
+	Type         string       `json:"type"`
+	Tickets      []DataTicket `json:"tickets"`
 }
 
 type DataProxy struct {
@@ -84,6 +107,9 @@ type DataAccount struct {
 	RateMultiplier     *float64              `json:"rate_multiplier,omitempty"`
 	ExpiresAt          *int64                `json:"expires_at,omitempty"`
 	AutoPauseOnExpired *bool                 `json:"auto_pause_on_expired,omitempty"`
+	// CodexTickets is accepted as a per-account alternative to ticket_info for
+	// forward compatibility with hand-authored or newer backup files.
+	CodexTickets []DataTicket `json:"codex_tickets,omitempty"`
 }
 
 type DataImportRequest struct {
@@ -103,6 +129,7 @@ type DataImportResult struct {
 	ProxyAssignFailed int               `json:"proxy_assign_failed,omitempty"`
 	PostImportUpdated int               `json:"post_import_updated,omitempty"`
 	PostImportFailed  int               `json:"post_import_failed,omitempty"`
+	TicketRestored    int               `json:"ticket_restored,omitempty"`
 	Errors            []DataImportError `json:"errors,omitempty"`
 }
 
@@ -151,6 +178,11 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 	}
 
 	includeProxies, err := parseIncludeProxies(c)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	includeTicketInfo, err := parseIncludeTicketInfo(c)
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
@@ -206,6 +238,7 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 	}
 
 	dataAccounts := make([]DataAccount, 0, len(accounts))
+	ticketInfo := make([]DataTicketInfo, 0)
 	for i := range accounts {
 		acc := accounts[i]
 		var proxyKey *string
@@ -260,6 +293,32 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 			ExpiresAt:          expiresAt,
 			AutoPauseOnExpired: &acc.AutoPauseOnExpired,
 		})
+		if includeTicketInfo {
+			materials := service.ExportOpenAICodexTicketMaterials(acc.Extra)
+			if len(materials) > 0 {
+				accountIndex := len(dataAccounts) - 1
+				entry := DataTicketInfo{
+					AccountIndex: &accountIndex,
+					AccountName:  acc.Name,
+					Platform:     acc.Platform,
+					Type:         acc.Type,
+					Tickets:      make([]DataTicket, 0, len(materials)),
+				}
+				for _, material := range materials {
+					capturedAt := material.CapturedAt
+					expiresAt := material.ExpiresAt
+					entry.Tickets = append(entry.Tickets, DataTicket{
+						Model:      material.Model,
+						State:      material.State,
+						Length:     material.Length,
+						CapturedAt: &capturedAt,
+						ExpiresAt:  &expiresAt,
+						Attempts:   material.Attempts,
+					})
+				}
+				ticketInfo = append(ticketInfo, entry)
+			}
+		}
 	}
 
 	payload := DataPayload{
@@ -267,6 +326,7 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 		Proxies:        dataProxies,
 		Accounts:       dataAccounts,
 		SkippedShadows: skippedShadows,
+		TicketInfo:     ticketInfo,
 	}
 
 	response.Success(c, payload)
@@ -287,6 +347,70 @@ func (h *AccountHandler) ImportData(c *gin.Context) {
 	executeAdminIdempotentJSON(c, "admin.accounts.import_data", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
 		return h.importData(ctx, req)
 	})
+}
+
+func importedCodexTicketMaterial(ticket DataTicket) (service.OpenAICodexTicketMaterial, error) {
+	material := service.OpenAICodexTicketMaterial{
+		Model:    ticket.Model,
+		State:    ticket.State,
+		Length:   ticket.Length,
+		Attempts: ticket.Attempts,
+	}
+	if ticket.CapturedAt != nil {
+		material.CapturedAt = *ticket.CapturedAt
+	}
+	if ticket.ExpiresAt != nil {
+		material.ExpiresAt = *ticket.ExpiresAt
+	}
+	if err := service.ValidateOpenAICodexTicketMaterial(material); err != nil {
+		return service.OpenAICodexTicketMaterial{}, err
+	}
+	return material, nil
+}
+
+func importedCodexTicketMaterials(payload DataPayload, accountIndex int, account DataAccount) ([]service.OpenAICodexTicketMaterial, error) {
+	candidates := append([]DataTicket(nil), account.CodexTickets...)
+	for _, info := range payload.TicketInfo {
+		matches := false
+		if info.AccountIndex != nil {
+			matches = *info.AccountIndex == accountIndex
+		} else {
+			matches = strings.TrimSpace(info.AccountName) == strings.TrimSpace(account.Name) &&
+				strings.TrimSpace(info.Platform) == strings.TrimSpace(account.Platform) &&
+				strings.TrimSpace(info.Type) == strings.TrimSpace(account.Type)
+		}
+		if matches {
+			candidates = append(candidates, info.Tickets...)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	byModel := make(map[string]service.OpenAICodexTicketMaterial, len(candidates))
+	for _, candidate := range candidates {
+		// Metadata-only exports from older versions are still importable. They
+		// restore no live ticket, while a record that contains State must be
+		// complete and pass the server-side validation below.
+		if strings.TrimSpace(candidate.State) == "" {
+			continue
+		}
+		material, err := importedCodexTicketMaterial(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("ticket %s: %w", strings.TrimSpace(candidate.Model), err)
+		}
+		if previous, exists := byModel[material.Model]; exists {
+			if previous.State == material.State && previous.ExpiresAt.Equal(material.ExpiresAt) {
+				continue
+			}
+			return nil, fmt.Errorf("conflicting ticket values for model %s", material.Model)
+		}
+		byModel[material.Model] = material
+	}
+	materials := make([]service.OpenAICodexTicketMaterial, 0, len(byModel))
+	for _, material := range byModel {
+		materials = append(materials, material)
+	}
+	return materials, nil
 }
 
 func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) (DataImportResult, error) {
@@ -462,6 +586,14 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			})
 			continue
 		}
+		ticketMaterials, ticketErr := importedCodexTicketMaterials(dataPayload, i, item)
+		if ticketErr != nil {
+			result.AccountFailed++
+			result.Errors = append(result.Errors, DataImportError{
+				Kind: "account", Name: item.Name, Message: "invalid Codex ticket backup: " + ticketErr.Error(),
+			})
+			continue
+		}
 
 		var proxyID *int64
 		if item.ProxyKey != nil && *item.ProxyKey != "" {
@@ -527,6 +659,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			Type:                 item.Type,
 			Credentials:          item.Credentials,
 			Extra:                item.Extra,
+			CodexTicketMaterials: ticketMaterials,
 			ProxyID:              proxyID,
 			ProxyPoolIDs:         proxyPoolIDs,
 			ProxyLaneConfigs:     proxyLaneConfigs,
@@ -557,6 +690,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		h.scheduleGrokImportProbe(created)
 		createdAccountIDs = append(createdAccountIDs, created.ID)
 		result.AccountCreated++
+		result.TicketRestored += len(ticketMaterials)
 	}
 
 	if req.PostImportUpdates != nil && len(createdAccountIDs) > 0 && hasBulkUpdateAccountFields(req.PostImportUpdates) {
@@ -791,6 +925,25 @@ func parseIncludeProxies(c *gin.Context) (bool, error) {
 		return false, nil
 	default:
 		return true, fmt.Errorf("invalid include_proxies value: %s", raw)
+	}
+}
+
+func parseIncludeTicketInfo(c *gin.Context) (bool, error) {
+	raw := strings.TrimSpace(strings.ToLower(c.Query("include_ticket_info")))
+	if raw == "" {
+		// Account exports already contain credentials and are protected by the
+		// admin export step-up. A ticket export must therefore be lossless by
+		// default: callers that explicitly need a metadata-only snapshot can
+		// still opt out with include_ticket_info=false.
+		return true, nil
+	}
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid include_ticket_info value: %s", raw)
 	}
 }
 

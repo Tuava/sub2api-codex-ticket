@@ -71,7 +71,8 @@ type AccountHandler struct {
 }
 
 type CodexTicketProber interface {
-	ProbeOpenAICodexTicket(ctx context.Context, accountID int64, model string) ([]service.OpenAICodexTicketStatus, error)
+	ProbeOpenAICodexTicket(ctx context.Context, accountID int64, model string, policy *service.OpenAICodexTicketProbePolicy, operationID string) (*service.OpenAICodexTicketProbeResult, []service.OpenAICodexTicketStatus, error)
+	GetOpenAICodexTicketProbeProgress(accountID int64, operationID string) (*service.OpenAICodexTicketProbeProgress, error)
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -1072,7 +1073,9 @@ func (h *AccountHandler) GetByID(c *gin.Context) {
 }
 
 type ProbeCodexTicketRequest struct {
-	Model string `json:"model" binding:"required"`
+	Model       string                                `json:"model" binding:"required"`
+	Policy      *service.OpenAICodexTicketProbePolicy `json:"policy"`
+	OperationID string                                `json:"operation_id" binding:"required,uuid"`
 }
 
 // ProbeCodexTicket performs one immediate, model-specific ticket harvest.
@@ -1092,12 +1095,32 @@ func (h *AccountHandler) ProbeCodexTicket(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
-	statuses, err := h.codexTicketProber.ProbeOpenAICodexTicket(c.Request.Context(), accountID, req.Model)
+	result, statuses, err := h.codexTicketProber.ProbeOpenAICodexTicket(c.Request.Context(), accountID, req.Model, req.Policy, req.OperationID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, gin.H{"model": req.Model, "tickets": statuses})
+	response.Success(c, gin.H{"operation_id": req.OperationID, "model": req.Model, "result": result, "tickets": statuses})
+}
+
+// GetCodexTicketProbeProgress returns the server-observed stage and redacted
+// event log for one manual probe operation.
+func (h *AccountHandler) GetCodexTicketProbeProgress(c *gin.Context) {
+	if h == nil || h.codexTicketProber == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Codex ticket prober unavailable")
+		return
+	}
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	progress, err := h.codexTicketProber.GetOpenAICodexTicketProbeProgress(accountID, c.Param("operation_id"))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, progress)
 }
 
 // CheckMixedChannel handles checking mixed channel risk for account-group binding.

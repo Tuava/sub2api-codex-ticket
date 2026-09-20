@@ -284,7 +284,11 @@
             </div>
           </template>
           <template #cell-capacity="{ row }">
-            <AccountCapacityCell :account="row" />
+            <AccountCapacityCell
+              :account="row"
+              :proxies="proxies"
+              @revert-proxy-fallback="onRevertFallback(row)"
+            />
           </template>
           <template #cell-status="{ row }">
             <div class="flex items-center gap-1.5">
@@ -325,17 +329,6 @@
               @account-updated="handleAccountUpdated"
               @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
             />
-          </template>
-          <template #cell-proxy="{ row }">
-            <div class="flex flex-col gap-1">
-              <ProxyLanesCell :account="row" :proxies="proxies" />
-              <div v-if="row.proxy_fallback_origin_id" class="flex items-center gap-1">
-                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200" :title="t('admin.accounts.fallbackActiveTip', { origin: row.proxy_fallback_origin_name })">
-                  {{ t('admin.accounts.fallbackActive') }}
-                </span>
-                <button class="text-xs px-1.5 py-0.5 rounded border border-gray-300 dark:border-dark-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700" @click="onRevertFallback(row)">{{ t('admin.accounts.revertProxy') }}</button>
-              </div>
-            </div>
           </template>
           <template #cell-rate_multiplier="{ row }">
             <span class="inline-flex items-center gap-1 text-sm font-mono text-gray-700 dark:text-gray-300">
@@ -441,7 +434,7 @@
       <template #pagination><Pagination v-if="pagination.total > 0" :page="pagination.page" :total="pagination.total" :page-size="pagination.page_size" @update:page="handlePageChange" @update:pageSize="handlePageSizeChange" /></template>
     </TablePageLayout>
     <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" />
-    <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
+    <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" @ticket-updated="handleTicketUpdated" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
@@ -473,6 +466,10 @@
       <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
         <input type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" v-model="includeProxyOnExport" />
         <span>{{ t('admin.accounts.dataExportIncludeProxies') }}</span>
+      </label>
+      <label class="mt-2 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+        <input type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" v-model="includeTicketInfoOnExport" />
+        <span>{{ t('admin.accounts.dataExportIncludeTicketInfo') }}</span>
       </label>
     </ConfirmDialog>
     <ErrorPassthroughRulesModal :show="showErrorPassthrough" @close="showErrorPassthrough = false" />
@@ -515,7 +512,6 @@ import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
-import ProxyLanesCell from '@/components/account/ProxyLanesCell.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -589,6 +585,7 @@ const showSync = ref(false)
 const showImportData = ref(false)
 const showExportDataDialog = ref(false)
 const includeProxyOnExport = ref(true)
+const includeTicketInfoOnExport = ref(true)
 const showBulkEdit = ref(false)
 const bulkEditTarget = ref<AccountBulkEditTarget | null>(null)
 const showTempUnsched = ref(false)
@@ -643,8 +640,6 @@ const HIDDEN_COLUMNS_KEY = 'account-hidden-columns'
 // One-time migration: hide scheduler score for existing admins too, because showing it opt-ins to heavy backend scoring.
 const HIDDEN_COLUMNS_VERSION_KEY = 'account-hidden-columns-version'
 const HIDDEN_COLUMNS_CURRENT_VERSION = 'scheduler-score-hidden-by-default'
-const PROXY_COLUMN_VISIBILITY_VERSION_KEY = 'account-proxy-lanes-column-version'
-const PROXY_COLUMN_VISIBILITY_CURRENT_VERSION = 'proxy-lanes-visible-v1'
 
 // Sorting settings
 const ACCOUNT_SORT_STORAGE_KEY = 'account-table-sort'
@@ -957,17 +952,14 @@ const loadSavedColumns = () => {
         localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
         localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
       }
-      if (localStorage.getItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY) !== PROXY_COLUMN_VISIBILITY_CURRENT_VERSION) {
-        hiddenColumns.delete('proxy')
-        localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
-        localStorage.setItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY, PROXY_COLUMN_VISIBILITY_CURRENT_VERSION)
-      }
+      // The former proxy column was folded into Capacity. Remove stale layout
+      // state so it cannot reappear in the column picker.
+      hiddenColumns.delete('proxy')
     } else {
       DEFAULT_HIDDEN_COLUMNS.forEach(key => {
         hiddenColumns.add(key)
       })
       localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
-      localStorage.setItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY, PROXY_COLUMN_VISIBILITY_CURRENT_VERSION)
     }
   } catch (e) {
     console.error('Failed to load saved columns:', e)
@@ -981,7 +973,6 @@ const saveColumnsToStorage = () => {
   try {
     localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...hiddenColumns]))
     localStorage.setItem(HIDDEN_COLUMNS_VERSION_KEY, HIDDEN_COLUMNS_CURRENT_VERSION)
-    localStorage.setItem(PROXY_COLUMN_VISIBILITY_VERSION_KEY, PROXY_COLUMN_VISIBILITY_CURRENT_VERSION)
   } catch (e) {
     console.error('Failed to save columns:', e)
   }
@@ -1293,7 +1284,7 @@ const refreshUpstreamBillingSortedList = async (force = false) => {
 useIntervalFn(() => { void refreshUpstreamBillingRates() }, 5 * 60_000, { immediate: false })
 
 const refreshProxyLaneRuntime = async () => {
-  if (loading.value || accounts.value.length === 0 || hiddenColumns.has('proxy')) return
+  if (loading.value || accounts.value.length === 0) return
   if (typeof document !== 'undefined' && document.hidden) return
   try {
     const runtime = await adminAPI.accounts.getProxyLaneRuntime(accounts.value.map((account) => account.id))
@@ -1830,7 +1821,6 @@ const allColumns = computed(() => {
   }
   c.push({ key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false })
   c.push(
-    { key: 'proxy', label: t('admin.accounts.columns.proxy'), sortable: false },
     { key: 'priority', label: t('admin.accounts.columns.priority'), sortable: true },
     { key: 'scheduler_score', label: t('admin.accounts.columns.schedulerScore'), sortable: false },
     { key: 'rate_multiplier', label: t('admin.accounts.columns.billingRateMultiplier'), sortable: true },
@@ -2287,6 +2277,18 @@ const handleAccountUpdated = (updatedAccount: Account) => {
   patchAccountInList(updatedAccount)
   enterAutoRefreshSilentWindow()
 }
+const handleTicketUpdated = (accountID: number, tickets: NonNullable<Account['codex_turn_tickets']>) => {
+  const index = accounts.value.findIndex((account) => account.id === accountID)
+  if (index >= 0) {
+    const next = [...accounts.value]
+    next[index] = { ...next[index], codex_turn_tickets: tickets }
+    accounts.value = next
+  }
+  if (edAcc.value?.id === accountID) {
+    edAcc.value = { ...edAcc.value, codex_turn_tickets: tickets }
+  }
+  enterAutoRefreshSilentWindow()
+}
 const formatExportTimestamp = () => {
   const now = new Date()
   const pad2 = (value: number) => String(value).padStart(2, '0')
@@ -2294,17 +2296,24 @@ const formatExportTimestamp = () => {
 }
 const openExportDataDialog = () => {
   includeProxyOnExport.value = true
+  includeTicketInfoOnExport.value = true
   showExportDataDialog.value = true
 }
+
 const handleExportData = async () => {
   if (exportingData.value) return
   exportingData.value = true
   try {
     const dataPayload = await accountExportStepUp.run(() => adminAPI.accounts.exportData(
       selIds.value.length > 0
-        ? { ids: selIds.value, includeProxies: includeProxyOnExport.value }
+        ? {
+            ids: selIds.value,
+            includeProxies: includeProxyOnExport.value,
+            includeTicketInfo: includeTicketInfoOnExport.value
+          }
         : {
             includeProxies: includeProxyOnExport.value,
+            includeTicketInfo: includeTicketInfoOnExport.value,
             filters: buildAccountQueryFilters()
           }
     ))

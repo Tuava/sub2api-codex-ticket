@@ -50,6 +50,9 @@
           multiple
           @change="handleFileChange"
         />
+        <p v-if="importTicketInfoCount > 0" class="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+          {{ t('admin.accounts.dataImportTicketInfoDetected', { count: importTicketInfoCount }) }}
+        </p>
       </div>
 
       <section class="overflow-hidden rounded-xl border border-gray-200 dark:border-dark-700">
@@ -209,7 +212,7 @@
           {{ t('admin.accounts.dataImportResult') }}
         </div>
         <div class="text-sm text-gray-700 dark:text-dark-300">
-          {{ t('admin.accounts.dataImportResultSummary', result) }}
+          {{ t('admin.accounts.dataImportResultSummary', resultSummary) }}
         </div>
 
         <div v-if="errorItems.length" class="mt-2">
@@ -345,6 +348,24 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const profileFileInput = ref<HTMLInputElement | null>(null)
 const importedAccounts = computed(() => parsedPayloads.value.flatMap((payload) => payload.accounts))
 const importAccountCount = computed(() => importedAccounts.value.length)
+const importTicketInfoCount = computed(() => parsedPayloads.value.reduce(
+  (sum, payload) => sum +
+    (Array.isArray(payload.ticket_info) ? payload.ticket_info.reduce(
+      (ticketSum, item) => ticketSum + (item.tickets?.filter((ticket) => Boolean(ticket.state)).length || 0),
+      0
+    ) : 0) +
+    payload.accounts.reduce((ticketSum, account) =>
+      ticketSum + (account.codex_tickets?.filter((ticket) => Boolean(ticket.state)).length || 0), 0),
+  0
+))
+const resultSummary = computed(() => ({
+  ...(result.value || {}),
+  proxy_assigned: result.value?.proxy_assigned || 0,
+  proxy_assign_failed: result.value?.proxy_assign_failed || 0,
+  post_import_updated: result.value?.post_import_updated || 0,
+  post_import_failed: result.value?.post_import_failed || 0,
+  ticket_restored: result.value?.ticket_restored || 0
+}))
 const importPlatforms = computed<AccountPlatform[]>(() => Array.from(new Set(
   importedAccounts.value.map((account) => account.platform).filter(Boolean)
 )))
@@ -756,18 +777,38 @@ const isValidDataPayload = (payload: unknown): payload is AdminDataPayload => {
   if (!isRecord(payload)) return false
   if (payload.type !== undefined && payload.type !== '' && !SUPPORTED_DATA_TYPES.includes(payload.type as string)) return false
   if (payload.version !== undefined && payload.version !== 0 && payload.version !== SUPPORTED_DATA_VERSION) return false
-  return Array.isArray(payload.proxies) && Array.isArray(payload.accounts)
+  if (!Array.isArray(payload.proxies) || !Array.isArray(payload.accounts)) return false
+  if (payload.ticket_info !== undefined) {
+    if (!Array.isArray(payload.ticket_info)) return false
+    if (!payload.ticket_info.every((item) => isRecord(item) && Array.isArray(item.tickets))) return false
+  }
+  return payload.accounts.every((account) => {
+    if (!isRecord(account) || account.codex_tickets === undefined) return true
+    return Array.isArray(account.codex_tickets)
+  })
 }
 
 const mergeDataPayloads = (payloads: AdminDataPayload[]): AdminDataPayload => {
   const [firstPayload] = payloads
   if (payloads.length === 1 && firstPayload) return firstPayload
+  let accountOffset = 0
+  const ticketInfo = payloads.flatMap((item) => {
+    const currentOffset = accountOffset
+    accountOffset += item.accounts.length
+    return (item.ticket_info || []).map((ticket) => ({
+      ...ticket,
+      ...(typeof ticket.account_index === 'number'
+        ? { account_index: ticket.account_index + currentOffset }
+        : {})
+    }))
+  })
   return {
     type: payloads.find((item) => typeof item.type === 'string')?.type,
     version: payloads.find((item) => typeof item.version === 'number')?.version,
     exported_at: new Date().toISOString(),
     proxies: payloads.flatMap((item) => item.proxies),
     accounts: payloads.flatMap((item) => item.accounts),
+    ticket_info: ticketInfo,
     skipped_shadows: payloads.reduce((sum, item) => {
       const count = Number(item.skipped_shadows || 0)
       return Number.isFinite(count) ? sum + count : sum
@@ -816,7 +857,8 @@ const handleImport = async () => {
       proxy_assigned: res.proxy_assigned || 0,
       proxy_assign_failed: res.proxy_assign_failed || 0,
       post_import_updated: res.post_import_updated || 0,
-      post_import_failed: res.post_import_failed || 0
+      post_import_failed: res.post_import_failed || 0,
+      ticket_restored: res.ticket_restored || 0
     }
     if (
       res.account_failed > 0 ||

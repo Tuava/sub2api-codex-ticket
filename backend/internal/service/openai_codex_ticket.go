@@ -10,12 +10,14 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/google/uuid"
@@ -91,6 +93,112 @@ type openAICodexTicket struct {
 	Attempts   int       `json:"attempts"`
 }
 
+// OpenAICodexTicketMaterial is the portable form of a persisted ticket. It
+// deliberately omits AccountID: importing a backup creates a new account, so
+// the source account id must never be carried into the destination record.
+type OpenAICodexTicketMaterial struct {
+	Model      string    `json:"model"`
+	State      string    `json:"state"`
+	Length     int       `json:"length"`
+	CapturedAt time.Time `json:"captured_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Attempts   int       `json:"attempts,omitempty"`
+}
+
+// ExportOpenAICodexTicketMaterials returns deterministic copies of the raw
+// ticket values stored in account extra. Observations are intentionally left
+// out: they are diagnostics, not reusable ticket material.
+func ExportOpenAICodexTicketMaterials(extra map[string]any) []OpenAICodexTicketMaterial {
+	if len(extra) == 0 {
+		return nil
+	}
+	materials := make([]OpenAICodexTicketMaterial, 0)
+	for key, raw := range extra {
+		if !strings.HasPrefix(key, openAICodexTicketExtraKeyPrefix) {
+			continue
+		}
+		model := strings.TrimPrefix(key, openAICodexTicketExtraKeyPrefix)
+		ticket := parseOpenAICodexTicketFromAny(0, model, raw)
+		if ticket == nil || strings.TrimSpace(ticket.State) == "" {
+			continue
+		}
+		materials = append(materials, OpenAICodexTicketMaterial{
+			Model:      ticket.Model,
+			State:      ticket.State,
+			Length:     ticket.Length,
+			CapturedAt: ticket.CapturedAt,
+			ExpiresAt:  ticket.ExpiresAt,
+			Attempts:   ticket.Attempts,
+		})
+	}
+	sort.Slice(materials, func(i, j int) bool { return materials[i].Model < materials[j].Model })
+	return materials
+}
+
+// ValidateOpenAICodexTicketMaterial rejects malformed or obviously unrelated
+// values before they can enter the server-managed ticket namespace.
+func ValidateOpenAICodexTicketMaterial(material OpenAICodexTicketMaterial) error {
+	model := strings.TrimSpace(material.Model)
+	if model == "" {
+		return errors.New("codex ticket model is required")
+	}
+	state := strings.TrimSpace(material.State)
+	if state == "" || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
+		return errors.New("codex ticket state is invalid")
+	}
+	length := material.Length
+	if length == 0 {
+		length = len(state)
+	}
+	if length < openAICodexTicketMinTargetLength || length > openAICodexTicketMaxTargetLength || len(state) != length {
+		return fmt.Errorf("codex ticket length is invalid: %d", length)
+	}
+	if material.CapturedAt.IsZero() || material.ExpiresAt.IsZero() {
+		return errors.New("codex ticket timestamps are required")
+	}
+	if material.Attempts < 0 {
+		return errors.New("codex ticket attempts must be non-negative")
+	}
+	return nil
+}
+
+// ApplyOpenAICodexTicketMaterials installs validated imported tickets into a
+// newly-created account. The values are stored under the same server-managed
+// keys used by the harvester; the normal account edit path still cannot inject
+// or overwrite those keys.
+func ApplyOpenAICodexTicketMaterials(account *Account, materials []OpenAICodexTicketMaterial) error {
+	if len(materials) == 0 {
+		return nil
+	}
+	if account == nil || !account.IsOpenAIOAuthLike() || account.IsShadow() {
+		return errors.New("codex tickets require a non-shadow OpenAI OAuth or setup-token account")
+	}
+	normalized := make(map[string]OpenAICodexTicketMaterial, len(materials))
+	for _, material := range materials {
+		material.Model = normalizeOpenAICodexTicketModel(material.Model)
+		if material.Length == 0 {
+			material.Length = len(strings.TrimSpace(material.State))
+		}
+		if err := ValidateOpenAICodexTicketMaterial(material); err != nil {
+			return err
+		}
+		if _, exists := normalized[material.Model]; exists {
+			return fmt.Errorf("duplicate codex ticket model: %s", material.Model)
+		}
+		material.State = strings.TrimSpace(material.State)
+		material.CapturedAt = material.CapturedAt.UTC()
+		material.ExpiresAt = material.ExpiresAt.UTC()
+		normalized[material.Model] = material
+	}
+	if account.Extra == nil {
+		account.Extra = make(map[string]any)
+	}
+	for model, material := range normalized {
+		account.Extra[openAICodexTicketExtraKey(model)] = material
+	}
+	return nil
+}
+
 // openAICodexTicketObservation records only redacted probe facts. It never
 // stores the state value and is safe to use for scheduling diagnostics.
 type openAICodexTicketObservation struct {
@@ -111,6 +219,29 @@ type openAICodexTicketPolicy struct {
 	TargetSource  string
 	MissingPolicy string
 	PlanType      string
+}
+
+// OpenAICodexTicketProbePolicy is the account/model policy submitted together
+// with an admin manual probe. Persisting it before the request guarantees that
+// the button probes exactly the values currently shown in the editor.
+type OpenAICodexTicketProbePolicy struct {
+	Enabled       bool   `json:"enabled"`
+	TargetMode    string `json:"target_mode"`
+	TargetLength  int    `json:"target_length"`
+	MissingPolicy string `json:"missing_policy"`
+}
+
+// OpenAICodexTicketProbeResult describes the attempt itself. A completed probe
+// can legitimately return a non-target state or 429; those are results rather
+// than transport failures and are returned to the UI with refreshed statuses.
+type OpenAICodexTicketProbeResult struct {
+	Model          string `json:"model"`
+	Attempted      bool   `json:"attempted"`
+	Outcome        string `json:"outcome"`
+	HTTPStatus     int    `json:"http_status,omitempty"`
+	ObservedLength int    `json:"observed_length,omitempty"`
+	TargetLength   int    `json:"target_length"`
+	Ready          bool   `json:"ready"`
 }
 
 func openAICodexTicketKey(accountID int64, model string) string {
@@ -586,10 +717,15 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 				next := observation.NextProbeAt
 				status.NextProbeAt = &next
 			}
-			if observation.Outcome == "rate_limited" || observation.Outcome == "quota_exhausted" || observation.Outcome == "error" {
+			switch observation.Outcome {
+			case "rate_limited", "quota_exhausted", "error", "http_error", "token_error":
 				status.TicketType = observation.Outcome
-			} else if observation.Length > 0 && observation.Length != policy.TargetLength && !status.Ready {
+			case "non_target":
 				status.TicketType = "non_target"
+			default:
+				if observation.Length > 0 && observation.Length != policy.TargetLength && !status.Ready {
+					status.TicketType = "non_target"
+				}
 			}
 		}
 		if ticket.valid(now, policy.TargetLength) {
@@ -743,16 +879,16 @@ func parseOpenAICodexTicketFromAny(accountID int64, model string, raw any) *open
 	return &ticket
 }
 
-func (s *OpenAIGatewayService) storeOpenAICodexTicket(ctx context.Context, account *Account, ticket *openAICodexTicket) {
+func (s *OpenAIGatewayService) storeOpenAICodexTicket(ctx context.Context, account *Account, ticket *openAICodexTicket) error {
 	if s == nil || account == nil || ticket == nil || account.ID <= 0 {
-		return
+		return errors.New("invalid codex ticket persistence input")
 	}
 	model := normalizeOpenAICodexTicketModel(ticket.Model)
 	ticket.Model = model
 	ticket.AccountID = account.ID
-	s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
 	if s.accountRepo == nil {
-		return
+		s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -764,16 +900,22 @@ func (s *OpenAIGatewayService) storeOpenAICodexTicket(ctx context.Context, accou
 			zap.String("model", model),
 			zap.Error(err),
 		)
+		return err
 	}
+	s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
+	return nil
 }
 
-func (s *OpenAIGatewayService) storeOpenAICodexTicketObservation(ctx context.Context, account *Account, observation *openAICodexTicketObservation) {
+func (s *OpenAIGatewayService) storeOpenAICodexTicketObservation(ctx context.Context, account *Account, observation *openAICodexTicketObservation) error {
 	if s == nil || account == nil || observation == nil || account.ID <= 0 || s.accountRepo == nil || ctx.Err() != nil {
-		return
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("codex ticket observation persistence unavailable")
 	}
 	observation.Model = normalizeOpenAICodexTicketModel(observation.Model)
 	if observation.Model == "" {
-		return
+		return errors.New("codex ticket observation model is empty")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -785,20 +927,25 @@ func (s *OpenAIGatewayService) storeOpenAICodexTicketObservation(ctx context.Con
 			zap.String("model", observation.Model),
 			zap.Error(err),
 		)
+		return err
 	}
+	return nil
 }
 
-func (s *OpenAIGatewayService) storeOpenAICodexTicketWithObservation(ctx context.Context, account *Account, ticket *openAICodexTicket, observation *openAICodexTicketObservation) {
+func (s *OpenAIGatewayService) storeOpenAICodexTicketWithObservation(ctx context.Context, account *Account, ticket *openAICodexTicket, observation *openAICodexTicketObservation) error {
 	if s == nil || account == nil || ticket == nil || observation == nil || account.ID <= 0 {
-		return
+		return errors.New("invalid codex ticket persistence input")
 	}
 	model := normalizeOpenAICodexTicketModel(ticket.Model)
 	ticket.Model = model
 	ticket.AccountID = account.ID
 	observation.Model = model
-	s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
-	if s.accountRepo == nil || ctx.Err() != nil {
-		return
+	if s.accountRepo == nil {
+		s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -808,7 +955,10 @@ func (s *OpenAIGatewayService) storeOpenAICodexTicketWithObservation(ctx context
 	}); err != nil {
 		logger.L().Warn("openai_codex_ticket persist failed",
 			zap.Int64("account_id", account.ID), zap.String("model", model), zap.Error(err))
+		return err
 	}
+	s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
+	return nil
 }
 
 func openAICodexTicketNextProbeAt(account *Account, model string, targetLength int) time.Time {
@@ -1009,35 +1159,143 @@ func (s *OpenAIGatewayService) StopOpenAICodexTicketHarvester() {
 	}
 }
 
+func codexTicketModelConfigured(models []string, model string) bool {
+	model = normalizeOpenAICodexTicketModel(model)
+	for _, configured := range models {
+		if normalizeOpenAICodexTicketModel(configured) == model {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeManualCodexTicketProbePolicy(policy *OpenAICodexTicketProbePolicy) (map[string]any, error) {
+	if policy == nil {
+		return nil, nil
+	}
+	if !policy.Enabled {
+		return nil, infraerrors.BadRequest("CODEX_TICKET_MODEL_DISABLED", "enable this ticket model before probing")
+	}
+	mode := strings.ToLower(strings.TrimSpace(policy.TargetMode))
+	if mode == "" {
+		mode = openAICodexTicketTargetModeAuto
+	}
+	if mode != openAICodexTicketTargetModeAuto && mode != openAICodexTicketTargetModeManual {
+		return nil, infraerrors.BadRequest("CODEX_TICKET_POLICY_INVALID", "target_mode must be auto or manual")
+	}
+	targetLength := policy.TargetLength
+	if targetLength == 0 {
+		targetLength = openAICodexTicketBusinessTargetLength
+	}
+	if targetLength < openAICodexTicketMinTargetLength || targetLength > openAICodexTicketMaxTargetLength {
+		return nil, infraerrors.BadRequest("CODEX_TICKET_POLICY_INVALID", fmt.Sprintf("target_length must be between %d and %d", openAICodexTicketMinTargetLength, openAICodexTicketMaxTargetLength))
+	}
+	missingPolicy := strings.ToLower(strings.TrimSpace(policy.MissingPolicy))
+	if missingPolicy == "" {
+		missingPolicy = openAICodexTicketMissingPolicyAllow
+	}
+	if missingPolicy != openAICodexTicketMissingPolicyPause && missingPolicy != openAICodexTicketMissingPolicyAllow {
+		return nil, infraerrors.BadRequest("CODEX_TICKET_POLICY_INVALID", "missing_policy must be pause or allow")
+	}
+	return map[string]any{
+		"enabled":                              true,
+		OpenAICodexTicketTargetModeExtraKey:    mode,
+		OpenAICodexTicketTargetLengthExtraKey:  targetLength,
+		OpenAICodexTicketMissingPolicyExtraKey: missingPolicy,
+	}, nil
+}
+
 // ProbeOpenAICodexTicket performs one immediate probe for an account/model and
-// returns the redacted status view. It is used by the admin "manual harvest"
-// action and shares the same proxy, identity, validation, and persistence path
-// as the background harvester.
-func (s *OpenAIGatewayService) ProbeOpenAICodexTicket(ctx context.Context, accountID int64, model string) ([]OpenAICodexTicketStatus, error) {
+// returns the attempt plus the redacted status view. It is used by the admin
+// manual action and shares the same proxy, identity, validation, and persistence
+// path as the background harvester.
+func (s *OpenAIGatewayService) ProbeOpenAICodexTicket(ctx context.Context, accountID int64, model string, submittedPolicy *OpenAICodexTicketProbePolicy, operationID string) (probeResult *OpenAICodexTicketProbeResult, statuses []OpenAICodexTicketStatus, returnErr error) {
+	progress, err := s.beginOpenAICodexTicketProbeProgress(operationID, accountID, model)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if returnErr != nil {
+			progress.fail(returnErr)
+		} else {
+			progress.complete(probeResult)
+		}
+	}()
+	progress.advance("validating", 8, "validating_account", nil)
 	if s == nil || s.accountRepo == nil {
-		return nil, errors.New("codex ticket service unavailable")
+		return nil, nil, infraerrors.ServiceUnavailable("CODEX_TICKET_PROBER_UNAVAILABLE", "codex ticket service unavailable")
 	}
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	model = normalizeOpenAICodexTicketModel(model)
 	if model == "" || !isOpenAICodexTicketAccount(account) {
-		return nil, errors.New("account or model is not eligible for Codex tickets")
+		return nil, nil, infraerrors.BadRequest("CODEX_TICKET_ACCOUNT_INELIGIBLE", "account or model is not eligible for Codex tickets")
 	}
 	cfg := s.openAICodexTicketConfig()
-	policy := resolveOpenAICodexTicketPolicyForModel(account, cfg, model)
-	if !policy.Enabled {
-		return nil, fmt.Errorf("codex ticket model %s is disabled", model)
+	if !codexTicketModelConfigured(cfg.Models, model) {
+		return nil, nil, infraerrors.BadRequest("CODEX_TICKET_MODEL_UNSUPPORTED", fmt.Sprintf("model %s is not configured for Codex tickets", model))
+	}
+	if !account.IsActive() || !account.Schedulable ||
+		(account.AutoPauseOnExpired && account.ExpiresAt != nil && !time.Now().Before(*account.ExpiresAt)) {
+		return nil, nil, infraerrors.Conflict("CODEX_TICKET_ACCOUNT_UNSCHEDULABLE", "account must be active with scheduling enabled before probing")
 	}
 	if !s.openAICodexTicketEnabledContext(ctx) {
-		return nil, errors.New("codex ticket harvesting is disabled")
+		return nil, nil, infraerrors.Conflict("CODEX_TICKET_DISABLED", "codex ticket harvesting is disabled")
 	}
-	s.probeOnceOpenAICodexTicket(ctx, account, model)
-	if refreshed, refreshErr := s.accountRepo.GetByID(ctx, accountID); refreshErr == nil && refreshed != nil {
-		account = refreshed
+	// The setting can enable harvesting at runtime even when the static file is
+	// disabled. Status rendering for this request must follow that effective state.
+	cfg.Enabled = true
+	if strings.TrimSpace(s.openAICodexTicketHarvestProxyURLContext(ctx)) == "" {
+		return nil, nil, infraerrors.ServiceUnavailable("CODEX_TICKET_PROXY_MISSING", "codex ticket harvest proxy is not configured")
 	}
-	return OpenAICodexTicketStatuses(account, s.openAICodexTicketConfig(), time.Now()), nil
+	if s.httpUpstream == nil {
+		return nil, nil, infraerrors.ServiceUnavailable("CODEX_TICKET_UPSTREAM_UNAVAILABLE", "codex ticket upstream transport is unavailable")
+	}
+	progress.advance("validating", 18, "validation_passed", map[string]string{"model": model})
+
+	policyExtra, err := normalizeManualCodexTicketProbePolicy(submittedPolicy)
+	if err != nil {
+		return nil, nil, err
+	}
+	if policyExtra != nil {
+		progress.advance("persisting_policy", 26, "persisting_policy", nil)
+		if account.Extra == nil {
+			account.Extra = make(map[string]any)
+		}
+		key := openAICodexTicketModelPolicyExtraKey(model)
+		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{key: policyExtra}); err != nil {
+			return nil, nil, infraerrors.ServiceUnavailable("CODEX_TICKET_POLICY_PERSIST_FAILED", "failed to persist ticket policy").WithCause(err)
+		}
+		account.Extra[key] = policyExtra
+	}
+
+	policy := resolveOpenAICodexTicketPolicyForModel(account, cfg, model)
+	if !policy.Enabled {
+		return nil, nil, infraerrors.Conflict("CODEX_TICKET_MODEL_DISABLED", fmt.Sprintf("codex ticket model %s is disabled", model))
+	}
+	progress.advance("acquiring_token", 34, "acquiring_token", codexTicketProbePolicyMetadata(model, policy.TargetLength))
+	probeResult, err = s.probeOnceOpenAICodexTicketDetailed(ctx, account, model, true, progress)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, nil, infraerrors.GatewayTimeout("CODEX_TICKET_PROBE_TIMEOUT", "codex ticket probe timed out").WithCause(err)
+		}
+		return nil, nil, infraerrors.ServiceUnavailable("CODEX_TICKET_PROBE_FAILED", "codex ticket probe failed").WithCause(err)
+	}
+	progress.advance("refreshing_status", 92, "refreshing_status", nil)
+	refreshed, refreshErr := s.accountRepo.GetByID(ctx, accountID)
+	if refreshErr != nil || refreshed == nil {
+		if refreshErr == nil {
+			refreshErr = errors.New("empty account after ticket probe")
+		}
+		return nil, nil, infraerrors.ServiceUnavailable("CODEX_TICKET_STATUS_REFRESH_FAILED", "ticket probe completed but refreshed status could not be loaded").WithCause(refreshErr)
+	}
+	account = refreshed
+	statusCfg := s.openAICodexTicketConfig()
+	statusCfg.Enabled = true
+	statuses = OpenAICodexTicketStatuses(account, statusCfg, time.Now())
+	return probeResult, statuses, nil
 }
 
 func (s *OpenAIGatewayService) openAICodexTicketHarvestLoop(ctx context.Context) {
@@ -1125,43 +1383,112 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) bo
 // gAAAAA 前缀）就落库；否则记 Info miss，交给下个周期重试。同一 key 并发去重，避免上一发还没
 // 回来又叠一发。
 func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) {
+	_, _ = s.probeOnceOpenAICodexTicketDetailed(ctx, account, model, s.accountRepo != nil, nil)
+}
+
+func (s *OpenAIGatewayService) probeOnceOpenAICodexTicketDetailed(ctx context.Context, account *Account, model string, recheckPolicy bool, progress *openAICodexTicketProbeProgressState) (*OpenAICodexTicketProbeResult, error) {
 	if s == nil || !isOpenAICodexTicketAccount(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
-		return
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("codex ticket probe is not eligible")
 	}
 	cfg := s.openAICodexTicketConfig()
 	policy := resolveOpenAICodexTicketPolicyForModel(account, cfg, model)
 	if !policy.Enabled {
-		return
+		return nil, fmt.Errorf("codex ticket model %s is disabled", model)
 	}
 	missRetryInterval, rateLimitRetryInterval := s.openAICodexTicketRetryIntervals(ctx)
 	proxyURL := s.openAICodexTicketHarvestProxyURLContext(ctx)
 	if proxyURL == "" || s.httpUpstream == nil || ctx.Err() != nil {
-		return
+		return nil, errors.New("codex ticket probe transport is unavailable")
 	}
-	key := openAICodexTicketKey(account.ID, model)
-	_, _, _ = s.openaiCodexTicketFlight.Do(key, func() (any, error) {
+	// Include target length so a manual policy change cannot join an older
+	// in-flight background probe that validates a different ticket shape.
+	key := fmt.Sprintf("%s\x00%d", openAICodexTicketKey(account.ID, model), policy.TargetLength)
+	value, err, _ := s.openaiCodexTicketFlight.Do(key, func() (any, error) {
 		now := time.Now()
+		result := &OpenAICodexTicketProbeResult{
+			Model: model, Attempted: true, TargetLength: policy.TargetLength,
+		}
+		policyStillCurrent := func(checkCtx context.Context) (bool, error) {
+			if !recheckPolicy || s.accountRepo == nil {
+				return true, nil
+			}
+			if checkCtx == nil {
+				checkCtx = context.Background()
+			}
+			checkCtx, cancel := context.WithTimeout(checkCtx, 5*time.Second)
+			defer cancel()
+			current, currentErr := s.accountRepo.GetByID(checkCtx, account.ID)
+			if currentErr != nil {
+				return false, currentErr
+			}
+			currentPolicy := resolveOpenAICodexTicketPolicyForModel(current, s.openAICodexTicketConfig(), model)
+			return currentPolicy.Enabled && currentPolicy.TargetLength == policy.TargetLength, nil
+		}
+		ensureCurrent := func(checkCtx context.Context) (bool, error) {
+			current, currentErr := policyStillCurrent(checkCtx)
+			if currentErr != nil {
+				return false, fmt.Errorf("reload ticket policy before persistence: %w", currentErr)
+			}
+			if !current {
+				result.Outcome = "superseded"
+				return false, nil
+			}
+			return true, nil
+		}
 		token, _, err := s.GetAccessToken(ctx, account)
 		if err != nil || strings.TrimSpace(token) == "" {
-			s.storeOpenAICodexTicketObservation(ctx, account, &openAICodexTicketObservation{
+			result.Outcome = "token_error"
+			progress.advance("persisting_result", 66, "token_unavailable", nil)
+			if current, currentErr := ensureCurrent(context.WithoutCancel(ctx)); currentErr != nil {
+				return nil, currentErr
+			} else if !current {
+				return result, nil
+			}
+			if persistErr := s.storeOpenAICodexTicketObservation(ctx, account, &openAICodexTicketObservation{
 				Model: model, TargetLength: policy.TargetLength, Outcome: "token_error", ObservedAt: now,
 				NextProbeAt: now.Add(missRetryInterval), Error: "token unavailable",
-			})
+			}); persistErr != nil {
+				return nil, fmt.Errorf("persist token-error observation: %w", persistErr)
+			}
 			logger.L().Info("openai_codex_ticket probe miss",
 				zap.Int64("account_id", account.ID), zap.String("model", model),
 				zap.String("reason", "token"), zap.Error(err))
-			return nil, nil
+			return result, nil
 		}
+		progress.advance("requesting_upstream", 48, "token_ready", nil)
+		progress.advance("requesting_upstream", 56, "sending_probe", nil)
 		state, status, perr := s.fireOpenAICodexTicketProbe(ctx, account, token, model, proxyURL, time.Duration(cfg.HarvestAttemptTimeoutSeconds)*time.Second)
 		if perr != nil {
-			s.storeOpenAICodexTicketObservation(ctx, account, &openAICodexTicketObservation{
+			result.Outcome = "error"
+			progress.advance("persisting_result", 66, "request_failed", nil)
+			persistCtx := context.WithoutCancel(ctx)
+			if current, currentErr := ensureCurrent(persistCtx); currentErr != nil {
+				return nil, currentErr
+			} else if !current {
+				return result, nil
+			}
+			if persistErr := s.storeOpenAICodexTicketObservation(persistCtx, account, &openAICodexTicketObservation{
 				Model: model, TargetLength: policy.TargetLength, Outcome: "error", ObservedAt: now,
 				NextProbeAt: now.Add(missRetryInterval), Error: truncateCodexTicketObservationError(perr.Error()),
-			})
+			}); persistErr != nil {
+				return nil, fmt.Errorf("persist probe-error observation: %w", persistErr)
+			}
 			logger.L().Info("openai_codex_ticket probe miss",
 				zap.Int64("account_id", account.ID), zap.String("model", model),
 				zap.String("reason", "error"), zap.Error(perr))
-			return nil, nil
+			return result, nil
+		}
+		result.HTTPStatus = status
+		result.ObservedLength = len(state)
+		progress.advance("validating_response", 72, "response_received", codexTicketProbeResponseMetadata(status, len(state), policy.TargetLength))
+		if current, currentErr := ensureCurrent(ctx); currentErr != nil {
+			return nil, currentErr
+		} else if !current {
+			progress.advance("persisting_result", 80, "probe_superseded", nil)
+			return result, nil
 		}
 		if status != http.StatusOK || state == "" || len(state) != policy.TargetLength || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
 			outcome := "non_target"
@@ -1172,15 +1499,19 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 			} else if status < http.StatusOK || status >= http.StatusMultipleChoices {
 				outcome = "http_error"
 			}
-			s.storeOpenAICodexTicketObservation(ctx, account, &openAICodexTicketObservation{
+			result.Outcome = outcome
+			progress.advance("persisting_result", 84, "persisting_observation", map[string]string{"outcome": outcome})
+			if persistErr := s.storeOpenAICodexTicketObservation(ctx, account, &openAICodexTicketObservation{
 				Model: model, TargetLength: policy.TargetLength, Length: len(state), HTTPStatus: status, Outcome: outcome,
 				ObservedAt: now, NextProbeAt: nextProbeAt,
-			})
+			}); persistErr != nil {
+				return nil, fmt.Errorf("persist probe observation: %w", persistErr)
+			}
 			logger.L().Info("openai_codex_ticket probe miss",
 				zap.Int64("account_id", account.ID), zap.String("model", model),
 				zap.Int("http", status), zap.Int("len", len(state)),
 				zap.Int("target_len", policy.TargetLength), zap.Time("next_probe_at", nextProbeAt))
-			return nil, nil
+			return result, nil
 		}
 		ticket := &openAICodexTicket{
 			AccountID:  account.ID,
@@ -1196,12 +1527,25 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 			Model: model, TargetLength: policy.TargetLength, Length: ticket.Length, HTTPStatus: status, Outcome: "target",
 			ObservedAt: now, NextProbeAt: nextProbeAt,
 		}
-		s.storeOpenAICodexTicketWithObservation(ctx, account, ticket, observation)
+		progress.advance("persisting_result", 84, "persisting_ticket", map[string]string{"length": strconv.Itoa(ticket.Length)})
+		if persistErr := s.storeOpenAICodexTicketWithObservation(ctx, account, ticket, observation); persistErr != nil {
+			return nil, fmt.Errorf("persist harvested ticket: %w", persistErr)
+		}
+		result.Outcome = "target"
+		result.Ready = true
 		logger.L().Info("openai_codex_ticket harvested",
 			zap.Int64("account_id", account.ID), zap.String("model", model),
 			zap.Int("length", ticket.Length), zap.String("mode", "continuous"))
-		return nil, nil
+		return result, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	result, ok := value.(*OpenAICodexTicketProbeResult)
+	if !ok || result == nil {
+		return nil, errors.New("codex ticket probe returned no result")
+	}
+	return result, nil
 }
 
 // openAICodexTicketRateLimitRetryAt keeps a transient 429 away from the

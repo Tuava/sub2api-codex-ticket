@@ -260,7 +260,9 @@ docker compose down -v
 | `ADMIN_EMAIL` | No | `admin@sub2api.local` | Admin email |
 | `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
-| `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Token for `api.github.com` release checks only; asset downloads remain anonymous. |
+| `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Preferred token for `api.github.com` release checks. Falls back to `GITHUB_TOKEN`/`GH_TOKEN`; asset downloads remain anonymous. |
+| `UPDATE_GITHUB_REPOSITORY` | No | *(auto)* | Release source (`owner/repo`). Tuava builds auto-select the customized repository. |
+| `UPDATE_DOCKER_IMAGE` | No | *(auto)* | Docker image shown in rollback instructions; derived from the release repository. |
 | `GEMINI_OAUTH_CLIENT_ID` | No | *(builtin)* | Google OAuth client ID (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_CLIENT_SECRET` | No | *(builtin)* | Google OAuth client secret (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |
 | `GEMINI_OAUTH_SCOPES` | No | *(default)* | OAuth scopes (Gemini OAuth) |

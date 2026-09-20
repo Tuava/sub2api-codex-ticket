@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, smartAssignProxiesMock, getByIdMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, smartAssignProxiesMock, getByIdMock, probeCodexTicketMock, getCodexTicketProbeProgressMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
   smartAssignProxiesMock: vi.fn(),
   getByIdMock: vi.fn(),
+  probeCodexTicketMock: vi.fn(),
+  getCodexTicketProbeProgressMock: vi.fn(),
   authIsSimpleMode: { value: true }
 }))
 
@@ -32,7 +34,9 @@ vi.mock('@/api/admin', () => ({
       update: updateAccountMock,
       checkMixedChannelRisk: checkMixedChannelRiskMock,
       smartAssignProxies: smartAssignProxiesMock,
-      getById: getByIdMock
+      getById: getByIdMock,
+      probeCodexTicket: probeCodexTicketMock,
+      getCodexTicketProbeProgress: getCodexTicketProbeProgressMock
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -332,6 +336,8 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
     smartAssignProxiesMock.mockReset()
     getByIdMock.mockReset()
+    probeCodexTicketMock.mockReset()
+    getCodexTicketProbeProgressMock.mockReset().mockRejectedValue(new Error('not ready'))
   })
 
   afterEach(() => vi.useRealTimers())
@@ -359,6 +365,104 @@ describe('EditAccountModal', () => {
     }))
     expect(getByIdMock).toHaveBeenCalledWith(1)
     expect(wrapper.emitted('updated')?.[0]?.[0]).toMatchObject({ proxy_id: 8, proxy_pool_ids: [9, 10] })
+  })
+
+  it('manual ticket probe sends the visible model policy without resetting unsaved edits', async () => {
+    const account = {
+      ...buildOpenAIOAuthParentAccount(),
+      codex_turn_tickets: [
+        {
+          model: 'gpt-6-astra',
+          ticket_type: 'missing',
+          target_length: 332,
+          target_mode: 'auto',
+          target_source: 'auto_business',
+          missing_policy: 'allow',
+          ready: false,
+          remaining_seconds: 0,
+          blocked: false
+        }
+      ]
+    }
+    const tickets = [{
+      ...account.codex_turn_tickets[0],
+      ticket_type: 'target',
+      length: 332,
+      ready: true,
+      remaining_seconds: 3600,
+      expires_at: '2028-01-01T00:00:00Z'
+    }]
+    probeCodexTicketMock.mockResolvedValue({
+      model: 'gpt-6-astra',
+      result: {
+        attempted: true,
+        outcome: 'target',
+        observed_length: 332,
+        target_length: 332,
+        ready: true
+      },
+      tickets
+    })
+
+    const wrapper = mountModal(account)
+    const nameInput = wrapper.get<HTMLInputElement>('[data-tour="edit-account-form-name"]')
+    await nameInput.setValue('unsaved account name')
+    const probeButton = wrapper.findAll('button').find((button) =>
+      button.text() === 'admin.accounts.openai.codexTicketProbeNow'
+    )!
+    await probeButton.trigger('click')
+    await flushPromises()
+
+    expect(probeCodexTicketMock).toHaveBeenCalledWith(
+      7,
+      'gpt-6-astra',
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+      {
+        enabled: true,
+        target_mode: 'auto',
+        target_length: 332,
+        missing_policy: 'allow'
+      }
+    )
+    expect(wrapper.emitted('ticket-updated')?.at(-1)).toEqual([7, tickets])
+    expect(wrapper.emitted('updated')).toBeUndefined()
+    expect(nameInput.element.value).toBe('unsaved account name')
+    expect(wrapper.text()).toContain('admin.accounts.openai.codexTurnTicketReady')
+  })
+
+  it('keeps unsaved form state and stable ticket cards during same-account background refresh', async () => {
+    const account = {
+      ...buildOpenAIOAuthParentAccount(),
+      codex_turn_tickets: [
+        {
+          model: 'gpt-6-astra',
+          ticket_type: 'missing',
+          target_length: 332,
+          target_mode: 'auto',
+          target_source: 'auto_business',
+          missing_policy: 'allow',
+          ready: false,
+          remaining_seconds: 0,
+          blocked: false
+        }
+      ]
+    }
+    const wrapper = mountModal(account)
+    const nameInput = wrapper.get<HTMLInputElement>('[data-tour="edit-account-form-name"]')
+    await nameInput.setValue('must survive refresh')
+
+    await wrapper.setProps({
+      account: {
+        ...account,
+        updated_at: '2028-01-01T00:00:01Z',
+        codex_turn_tickets: []
+      }
+    })
+    await flushPromises()
+
+    expect(nameInput.element.value).toBe('must survive refresh')
+    expect(wrapper.find('[data-testid="codex-ticket-card-gpt-6-astra"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="codex-ticket-card-gpt-5.6-sol"]').exists()).toBe(true)
   })
 
   it('sets expiry presets from now instead of extending the saved expiry', async () => {

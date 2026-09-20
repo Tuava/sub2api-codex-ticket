@@ -1,5 +1,5 @@
 <template>
-  <div class="min-w-[260px] space-y-1.5" data-testid="proxy-lanes-cell">
+  <div class="min-w-0 max-w-[320px] space-y-1.5" data-testid="proxy-lanes-cell">
     <div v-if="lanes.length === 0" class="text-sm text-gray-400 dark:text-gray-500">-</div>
     <div
       v-for="lane in lanes"
@@ -25,14 +25,16 @@
       <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-gray-500 dark:text-gray-400">
         <span>{{ laneStatus(lane) }}</span>
         <span v-if="proxyFor(lane.proxy_id)?.latency_ms != null">{{ proxyFor(lane.proxy_id)?.latency_ms }}ms</span>
-        <span v-if="lane.weight !== 1">W{{ lane.weight }}</span>
-        <span v-if="lane.timeout_seconds > 0">{{ lane.timeout_seconds }}s</span>
         <span v-if="lane.expires_at">{{ t('admin.accounts.proxyLanes.expires', { time: formatDateTime(lane.expires_at) }) }}</span>
       </div>
     </div>
     <div v-if="lanes.length > 1" class="flex items-center justify-between px-1 text-[10px] text-gray-400">
-      <span>{{ strategyLabel }}</span>
-      <span>{{ totalCurrent }}/{{ totalMax }}</span>
+      <div class="min-w-0 truncate">
+        <span>{{ strategyLabel }}</span>
+        <span class="mx-1">·</span>
+        <span>{{ unifiedSummary }}</span>
+      </div>
+      <span class="shrink-0 pl-2">{{ totalCurrent }}/{{ totalMax }}</span>
     </div>
   </div>
 </template>
@@ -55,6 +57,17 @@ const lanes = computed(() => props.account.proxy_lanes || [])
 const totalCurrent = computed(() => lanes.value.reduce((sum, lane) => sum + lane.current_concurrency, 0))
 const totalMax = computed(() => lanes.value.reduce((sum, lane) => sum + (lane.enabled ? lane.max_concurrency : 0), 0))
 const strategyLabel = computed(() => t(`admin.accounts.proxyLanes.strategy.${props.account.proxy_lane_strategy || 'round_robin'}`))
+const unifiedConfig = computed(() => lanes.value[0])
+const unifiedSummary = computed(() => {
+  const config = unifiedConfig.value
+  if (!config) return ''
+  return t('admin.accounts.proxyLanes.unifiedSummary', {
+    weight: config.weight,
+    timeout: config.timeout_seconds,
+    threshold: config.error_circuit_threshold,
+    cooldown: config.circuit_cooldown_seconds
+  })
+})
 
 const lanePercent = (lane: ProxyLaneStatus) => lane.max_concurrency > 0
   ? Math.min(100, Math.round((lane.current_concurrency / lane.max_concurrency) * 100))

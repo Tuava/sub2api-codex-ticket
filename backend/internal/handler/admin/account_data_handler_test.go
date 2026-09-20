@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -18,11 +20,12 @@ type dataResponse struct {
 }
 
 type dataPayload struct {
-	Type           string        `json:"type"`
-	Version        int           `json:"version"`
-	Proxies        []dataProxy   `json:"proxies"`
-	Accounts       []dataAccount `json:"accounts"`
-	SkippedShadows int           `json:"skipped_shadows"`
+	Type           string           `json:"type"`
+	Version        int              `json:"version"`
+	Proxies        []dataProxy      `json:"proxies"`
+	Accounts       []dataAccount    `json:"accounts"`
+	TicketInfo     []DataTicketInfo `json:"ticket_info"`
+	SkippedShadows int              `json:"skipped_shadows"`
 }
 
 type dataProxy struct {
@@ -451,12 +454,17 @@ func TestImportDataAppliesPostImportBulkUpdatesOnlyToCreatedAccounts(t *testing.
 	require.Equal(t, schedulable, *adminSvc.lastBulkUpdateAccountInput.Schedulable)
 }
 
-func TestExportDataExcludesCodexTicketMaterial(t *testing.T) {
+func TestExportDataIncludesCodexTicketOriginalByDefault(t *testing.T) {
 	router, adminSvc := setupAccountDataRouter()
+	now := time.Now().UTC().Truncate(time.Second)
+	state := "gAAAAA" + strings.Repeat("B", 292-len("gAAAAA"))
 	extra := map[string]any{
-		"codex_turn_ticket:gpt-6-astra": map[string]any{"state": "private-ticket-blob", "length": 292},
-		"codex_harvest_proxy_url":       "http://user:legacy-proxy-secret@proxy.example.com:8080",
-		"ordinary":                      "retained",
+		"codex_turn_ticket:gpt-6-astra": map[string]any{
+			"model": "gpt-6-astra", "state": state, "length": len(state),
+			"captured_at": now, "expires_at": now.Add(time.Hour), "attempts": 2,
+		},
+		"codex_harvest_proxy_url": "http://user:legacy-proxy-secret@proxy.example.com:8080",
+		"ordinary":                "retained",
 	}
 	adminSvc.accounts = []service.Account{{ID: 21, Name: "account", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: map[string]any{"access_token": "backup-token"}, Extra: extra}}
 	rec := httptest.NewRecorder()
@@ -467,8 +475,68 @@ func TestExportDataExcludesCodexTicketMaterial(t *testing.T) {
 	require.Len(t, resp.Data.Accounts, 1)
 	require.Equal(t, map[string]any{"ordinary": "retained"}, resp.Data.Accounts[0].Extra)
 	require.Equal(t, "backup-token", resp.Data.Accounts[0].Credentials["access_token"])
-	require.NotContains(t, rec.Body.String(), "private-ticket-blob")
+	require.Len(t, resp.Data.TicketInfo, 1)
+	require.Equal(t, 0, *resp.Data.TicketInfo[0].AccountIndex)
+	require.Len(t, resp.Data.TicketInfo[0].Tickets, 1)
+	require.Equal(t, state, resp.Data.TicketInfo[0].Tickets[0].State)
+	require.Equal(t, len(state), resp.Data.TicketInfo[0].Tickets[0].Length)
 	require.NotContains(t, rec.Body.String(), "legacy-proxy-secret")
 	require.Contains(t, extra, "codex_turn_ticket:gpt-6-astra")
 	require.Contains(t, extra, "codex_harvest_proxy_url")
 }
+
+func TestExportDataCanExplicitlyOmitCodexTicketOriginal(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	adminSvc.accounts = []service.Account{{
+		ID: 21, Name: "account", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "backup-token"},
+		Extra: map[string]any{
+			"codex_turn_ticket:gpt-6-astra": map[string]any{"state": "private-ticket-blob", "length": 292},
+		},
+	}}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/data?include_proxies=false&include_ticket_info=false", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotContains(t, rec.Body.String(), "private-ticket-blob")
+}
+
+func TestImportDataRestoresCodexTicketOriginal(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	now := time.Now().UTC().Truncate(time.Second)
+	state := "gAAAAA" + strings.Repeat("B", 332-len("gAAAAA"))
+	accountIndex := 0
+	payload := DataImportRequest{Data: DataPayload{
+		Type: dataType, Version: dataVersion, Proxies: []DataProxy{},
+		Accounts: []DataAccount{{
+			Name: "codex", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+			Credentials: map[string]any{"access_token": "token"},
+		}},
+		TicketInfo: []DataTicketInfo{{
+			AccountIndex: &accountIndex, AccountName: "codex", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+			Tickets: []DataTicket{{
+				Model: "gpt-6-astra", State: state, Length: len(state),
+				CapturedAt: &now, ExpiresAt: timePtr(now.Add(time.Hour)), Attempts: 3,
+			}},
+		}},
+	}}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var responseBody struct {
+		Data DataImportResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &responseBody))
+	require.Equal(t, 1, responseBody.Data.TicketRestored)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	require.Len(t, adminSvc.createdAccounts[0].CodexTicketMaterials, 1)
+	require.Equal(t, state, adminSvc.createdAccounts[0].CodexTicketMaterials[0].State)
+	require.Equal(t, now.Add(time.Hour), adminSvc.createdAccounts[0].CodexTicketMaterials[0].ExpiresAt)
+}
+
+func timePtr(value time.Time) *time.Time { return &value }

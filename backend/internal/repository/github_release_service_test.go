@@ -133,6 +133,74 @@ func TestGitHubReleaseClientDoesNotAuthorizeDownloads(t *testing.T) {
 	}
 }
 
+func TestGitHubReleaseClientFallsBackToAtomWhenAPIRateLimited(t *testing.T) {
+	const atom = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>tag:github.com,2008:Repository/1/v0.2.7-tuava.1</id>
+    <updated>2026-09-19T14:15:51Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Tuava/sub2api-codex-ticket/releases/tag/v0.2.7-tuava.1"/>
+    <title>Sub2API 0.2.7-tuava.1</title>
+    <content type="html">release notes</content>
+  </entry>
+</feed>`
+
+	client := newTestGitHubReleaseClient()
+	client.httpClient.Transport = githubReleaseRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "api.github.com" {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header: http.Header{
+					"X-Ratelimit-Remaining": []string{"0"},
+					"X-Ratelimit-Reset":     []string{"1800000000"},
+				},
+				Body:    io.NopCloser(strings.NewReader(`{"message":"API rate limit exceeded"}`)),
+				Request: req,
+			}, nil
+		}
+		require.Equal(t, "github.com", req.URL.Host)
+		require.Equal(t, "/Tuava/sub2api-codex-ticket/releases.atom", req.URL.Path)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/atom+xml"}},
+			Body:       io.NopCloser(strings.NewReader(atom)),
+			Request:    req,
+		}, nil
+	})
+
+	releases, err := client.FetchRecentReleases(context.Background(), "Tuava/sub2api-codex-ticket", 15)
+	require.NoError(t, err)
+	require.Len(t, releases, 1)
+	require.Equal(t, "v0.2.7-tuava.1", releases[0].TagName)
+	require.False(t, releases[0].Prerelease)
+	require.Equal(t, "sub2api_0.2.7-tuava.1_linux_amd64.tar.gz", releases[0].Assets[0].Name)
+	require.Contains(t, releases[0].Assets[0].BrowserDownloadURL, "/v0.2.7-tuava.1/")
+}
+
+func TestGitHubAPIErrorExplainsAnonymousRateLimit(t *testing.T) {
+	client := newTestGitHubReleaseClient()
+	err := client.parseAPIError(&http.Response{
+		StatusCode: http.StatusForbidden,
+		Header: http.Header{
+			"X-Ratelimit-Remaining": []string{"0"},
+			"X-Ratelimit-Reset":     []string{"1800000000"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"message":"API rate limit exceeded"}`)),
+	})
+	require.ErrorContains(t, err, "UPDATE_GITHUB_TOKEN")
+	require.ErrorContains(t, err, "2027-")
+}
+
+func TestNormalizeGitHubRepositoryRejectsInvalidValues(t *testing.T) {
+	for _, value := range []string{"", "owner", "owner/repo/extra", "owner/../repo", "owner/repo?x=1", "owner@evil/repo"} {
+		_, err := normalizeGitHubRepository(value)
+		require.Error(t, err, value)
+	}
+	normalized, err := normalizeGitHubRepository("Tuava/sub2api-codex-ticket")
+	require.NoError(t, err)
+	require.Equal(t, "Tuava/sub2api-codex-ticket", normalized)
+}
+
 type githubReleaseRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f githubReleaseRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

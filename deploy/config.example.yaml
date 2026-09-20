@@ -1226,6 +1226,13 @@ gemini:
 # Update Configuration (在线更新配置)
 # =============================================================================
 update:
+  # GitHub release source. Leave empty to auto-select Tuava/sub2api-codex-ticket
+  # for -tuava builds and Wei-Shaw/sub2api for official builds.
+  # GitHub Release 来源。留空时，-tuava 构建自动使用 Tuava 定制仓库，官方构建使用上游仓库。
+  repository: ""
+  # Docker image shown in rollback instructions. Empty is derived from repository.
+  # 回退说明中展示的 Docker 镜像。留空时根据 repository 自动推导。
+  docker_image: ""
   # Proxy URL for accessing GitHub (used for online updates and pricing data)
   # 用于访问 GitHub 的代理地址（用于在线更新和定价数据获取）
   # Supports: http, https, socks5, socks5h

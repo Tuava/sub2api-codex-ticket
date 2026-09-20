@@ -118,6 +118,44 @@ func TestUpdateServiceListRollbackVersionsSortsUnorderedInput(t *testing.T) {
 	require.Equal(t, "0.1.144", versions[2].Version)
 }
 
+func TestUpdateServiceTuavaBuildUsesCustomizedReleaseSource(t *testing.T) {
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		&updateServiceGitHubClientStub{recentReleases: []*GitHubRelease{
+			{TagName: "v0.2.7-tuava.2"},
+			{TagName: "v0.2.7-tuava.1", PublishedAt: "2026-09-19T14:15:51Z"},
+			{TagName: "v0.2.6-tuava.11"},
+		}},
+		"0.2.7-tuava.2",
+		"release",
+	)
+
+	versions, err := svc.ListRollbackVersions(context.Background())
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	require.Equal(t, "0.2.7-tuava.1", versions[0].Version)
+	require.Equal(t, "v0.2.7-tuava.1", versions[0].TagName)
+	require.Equal(t, tuavaGitHubRepo, versions[0].Repository)
+	require.Equal(t, "ghcr.io/tuava/sub2api", versions[0].DockerImage)
+}
+
+func TestCompareVersionsIncludesTuavaBuildNumber(t *testing.T) {
+	require.Equal(t, 1, compareVersions("0.2.7-tuava.2", "0.2.7-tuava.1"))
+	require.Equal(t, -1, compareVersions("0.2.7-tuava.1", "0.2.7-tuava.2"))
+	require.Equal(t, 0, compareVersions("v0.2.7-tuava.2", "0.2.7-tuava.2"))
+	require.Equal(t, 1, compareVersions("0.2.7", "0.2.7-tuava.2"))
+}
+
+func TestResolveUpdateRepositorySupportsOverride(t *testing.T) {
+	t.Setenv("UPDATE_GITHUB_REPOSITORY", "")
+	t.Setenv("UPDATE_DOCKER_IMAGE", "")
+	require.Equal(t, tuavaGitHubRepo, resolveUpdateRepository("0.2.7-tuava.2", ""))
+	require.Equal(t, defaultGitHubRepo, resolveUpdateRepository("0.2.7", ""))
+	require.Equal(t, "owner/custom", resolveUpdateRepository("0.2.7", " owner/custom "))
+	require.Equal(t, "ghcr.io/tuava/sub2api", resolveUpdateDockerImage(tuavaGitHubRepo, ""))
+	require.Equal(t, "custom/image", resolveUpdateDockerImage(tuavaGitHubRepo, " custom/image "))
+}
+
 func TestUpdateServiceListRollbackVersionsEmptyWhenNoneOlder(t *testing.T) {
 	releases := []*GitHubRelease{
 		{TagName: "v0.1.147"},

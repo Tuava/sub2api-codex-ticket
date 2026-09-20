@@ -113,6 +113,25 @@ describe('ImportDataModal', () => {
     expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
   })
 
+  it('拒绝结构损坏的门票字段而不在预览阶段抛异常', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    const wrapper = mountModal()
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
+    setInputFiles(input.element, [makeJsonFile('broken-ticket.json', JSON.stringify({
+      exported_at: '2026-09-20T00:00:00Z',
+      proxies: [],
+      accounts: [{ name: 'a', codex_tickets: {} }],
+      ticket_info: {}
+    }))])
+
+    await input.trigger('change')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportInvalidFile')
+    expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
+  })
+
   it('无有效 JSON 的选择不清空已有选择', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
@@ -187,6 +206,92 @@ describe('ImportDataModal', () => {
       skip_default_group_bind: true
     })
     expect(showSuccess).toHaveBeenCalledWith('admin.accounts.dataImportSuccess')
+  })
+
+  it('passes original ticket values through and offsets account indexes when merging files', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 3,
+      account_failed: 0
+    })
+
+    const wrapper = mountModal()
+    const input = wrapper.find('[data-testid="account-import-file-input"]')
+    const ticket = (model: string, state?: string) => ({
+      model,
+      ...(state ? { state } : {}),
+      length: state?.length || 0,
+      ticket_type: state ? 'target' : 'missing',
+      target_length: 332,
+      target_mode: 'auto',
+      target_source: 'global_default',
+      missing_policy: 'allow',
+      ready: Boolean(state),
+      remaining_seconds: 300,
+      blocked: false,
+      captured_at: '2026-09-20T00:00:00Z',
+      expires_at: '2026-09-20T01:00:00Z',
+      attempts: 2
+    })
+    const first = makeJsonFile('first.json', JSON.stringify({
+      exported_at: '2026-09-20T00:00:00Z',
+      proxies: [],
+      accounts: [{ name: 'same', platform: 'openai', type: 'oauth', extra: {} }],
+      ticket_info: [{
+        account_index: 0,
+        account_name: 'same',
+        platform: 'openai',
+        type: 'oauth',
+        tickets: [ticket('gpt-6-astra', 'eyJvcmlnaW5hbCI6dHJ1ZX0=')]
+      }]
+    }))
+    const second = makeJsonFile('second.json', JSON.stringify({
+      exported_at: '2026-09-20T00:00:01Z',
+      proxies: [],
+      accounts: [
+        { name: 'same', platform: 'openai', type: 'oauth', extra: {} },
+        { name: 'same', platform: 'openai', type: 'oauth', extra: {} }
+      ],
+      ticket_info: [{
+        account_index: 1,
+        account_name: 'same',
+        platform: 'openai',
+        type: 'oauth',
+        tickets: [ticket('gpt-5.6-sol'), ticket('gpt-6-astra', 'raw-ticket-second-file')]
+      }]
+    }))
+    setInputFiles(input.element, [first, second])
+
+    await input.trigger('change')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        accounts: [
+          expect.objectContaining({ name: 'same', extra: {} }),
+          expect.objectContaining({ name: 'same', extra: {} }),
+          expect.objectContaining({ name: 'same', extra: {} })
+        ],
+        ticket_info: [
+          expect.objectContaining({
+            account_index: 0,
+            tickets: [expect.objectContaining({ state: 'eyJvcmlnaW5hbCI6dHJ1ZX0=', attempts: 2 })]
+          }),
+          expect.objectContaining({
+            account_index: 2,
+            tickets: [
+              expect.not.objectContaining({ state: expect.anything() }),
+              expect.objectContaining({ state: 'raw-ticket-second-file', attempts: 2 })
+            ]
+          })
+        ]
+      }),
+      skip_default_group_bind: true
+    })
   })
 
   it('配置方案可同时保存批量编辑和智能代理并用于导入', async () => {

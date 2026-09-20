@@ -650,10 +650,10 @@ import {
 } from '@/api/admin/system'
 import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
+import { extractApiErrorCode, extractApiErrorMessage, extractApiErrorMetadata } from '@/utils/apiError'
 
-const GITHUB_REPO = 'Wei-Shaw/sub2api'
-// Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
-const DOCKER_IMAGE = 'weishaw/sub2api'
+const DEFAULT_GITHUB_REPO = 'Wei-Shaw/sub2api'
+const DEFAULT_DOCKER_IMAGE = 'weishaw/sub2api'
 
 const { t } = useI18n()
 
@@ -707,17 +707,25 @@ const manualTabs = computed(() => [
   { key: 'docker' as const, label: t('version.deployDocker') }
 ])
 
+const selectedRollbackItem = computed(() =>
+  rollbackVersions.value.find((item) => item.version === selectedRollbackVersion.value) || null
+)
+
 const scriptRollbackCommand = computed(() => {
-  if (!selectedRollbackVersion.value) return ''
-  const tag = `v${selectedRollbackVersion.value}`
-  return `curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/${tag}/deploy/install.sh | sudo bash -s -- rollback ${tag}`
+  const item = selectedRollbackItem.value
+  if (!item) return ''
+  const tag = item.tag_name || `v${item.version}`
+  const repository = item.repository || DEFAULT_GITHUB_REPO
+  return `curl -sSL https://raw.githubusercontent.com/${repository}/main/deploy/install.sh | sudo GITHUB_REPO=${repository} bash -s -- rollback ${tag}`
 })
 
 const dockerRollbackCommand = computed(() => {
-  if (!selectedRollbackVersion.value) return ''
+  const item = selectedRollbackItem.value
+  if (!item) return ''
+  const image = item.docker_image || DEFAULT_DOCKER_IMAGE
   return [
     `# ${t('version.dockerEditCompose')}`,
-    `image: ${DOCKER_IMAGE}:${selectedRollbackVersion.value}`,
+    `image: ${image}:${item.version}`,
     '',
     `# ${t('version.dockerRecreate')}`,
     'docker compose up -d'
@@ -804,9 +812,23 @@ async function loadRollbackVersions() {
     const data = await getRollbackVersions()
     rollbackVersions.value = data.versions || []
   } catch (error: unknown) {
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    rollbackVersionsError.value =
-      err.response?.data?.message || err.message || t('version.loadVersionsFailed')
+    const message = extractApiErrorMessage(error, t('version.loadVersionsFailed'))
+    const code = extractApiErrorCode(error)
+    const metadata = extractApiErrorMetadata(error)
+    const lower = message.toLowerCase()
+    if (
+      code === 'GITHUB_RELEASES_UNAVAILABLE' && metadata?.rate_limited === 'true' ||
+      lower.includes('rate limit') ||
+      lower.includes('api returned 403')
+    ) {
+      rollbackVersionsError.value = metadata?.rate_limit_reset_at
+        ? t('version.githubRateLimitedUntil', { time: metadata.rate_limit_reset_at })
+        : t('version.githubRateLimited')
+    } else if (lower.includes('atom fallback failed')) {
+      rollbackVersionsError.value = t('version.githubUnavailable', { message })
+    } else {
+      rollbackVersionsError.value = message
+    }
   } finally {
     rollbackVersionsLoading.value = false
   }

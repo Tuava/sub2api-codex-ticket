@@ -1626,8 +1626,27 @@ export interface AdminDataPayload {
   exported_at: string
   proxies: AdminDataProxy[]
   accounts: AdminDataAccount[]
+  /** Optional Codex ticket backup. When requested, entries may contain the original ticket state. */
+  ticket_info?: AdminDataTicketInfo[]
   // 导出时被排除的 spark 影子账号数量(影子不持凭据、其调度配置不在备份范围)。
   skipped_shadows?: number
+}
+
+export interface AdminDataTicketInfo {
+  /** Index into AdminDataPayload.accounts. Preferred over identity fields when present. */
+  account_index?: number
+  account_name: string
+  platform: AccountPlatform
+  type: AccountType
+  tickets: AdminDataTicket[]
+}
+
+export type AdminDataTicket = Partial<NonNullable<Account['codex_turn_tickets']>[number]> & {
+  model: string
+  /** Original x-codex-turn-state value. Omitted in legacy metadata-only exports. */
+  state?: string
+  captured_at?: string
+  attempts?: number
 }
 
 export interface AdminDataProxy {
@@ -1657,6 +1676,8 @@ export interface AdminDataAccount {
   rate_multiplier?: number | null
   expires_at?: number | null
   auto_pause_on_expired?: boolean
+  /** Accepted for forward compatibility with account-embedded ticket backups. */
+  codex_tickets?: AdminDataTicket[]
 }
 
 export interface AdminDataImportError {
@@ -1676,6 +1697,7 @@ export interface AdminDataImportResult {
   proxy_assign_failed?: number
   post_import_updated?: number
   post_import_failed?: number
+  ticket_restored?: number
   errors?: AdminDataImportError[]
 }
 

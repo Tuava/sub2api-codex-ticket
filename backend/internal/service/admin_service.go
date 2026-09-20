@@ -394,24 +394,27 @@ type UpdateGroupInput struct {
 }
 
 type CreateAccountInput struct {
-	Name               string
-	Notes              *string
-	Platform           string
-	Type               string
-	Credentials        map[string]any
-	Extra              map[string]any
-	ProxyID            *int64
-	ProxyPoolIDs       []int64
-	ProxyLaneConfigs   []ProxyLaneConfig
-	ProxyLaneStrategy  string
-	Concurrency        int
-	Priority           int
-	RateMultiplier     *float64 // 账号计费倍率（>=0，允许 0）
-	LoadFactor         *int
-	GroupIDs           []int64
-	ExpiresAt          *int64
-	AutoPauseOnExpired *bool
-	ProbeEnabled       *bool
+	Name        string
+	Notes       *string
+	Platform    string
+	Type        string
+	Credentials map[string]any
+	Extra       map[string]any
+	// CodexTicketMaterials is only used by an explicit administrator backup
+	// import. Ordinary account edits cannot write server-managed ticket keys.
+	CodexTicketMaterials []OpenAICodexTicketMaterial
+	ProxyID              *int64
+	ProxyPoolIDs         []int64
+	ProxyLaneConfigs     []ProxyLaneConfig
+	ProxyLaneStrategy    string
+	Concurrency          int
+	Priority             int
+	RateMultiplier       *float64 // 账号计费倍率（>=0，允许 0）
+	LoadFactor           *int
+	GroupIDs             []int64
+	ExpiresAt            *int64
+	AutoPauseOnExpired   *bool
+	ProbeEnabled         *bool
 	// SkipDefaultGroupBind prevents auto-binding to platform default group when GroupIDs is empty.
 	SkipDefaultGroupBind bool
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
