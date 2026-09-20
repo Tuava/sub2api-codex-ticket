@@ -574,7 +574,14 @@ func (s *OpenAIGatewayService) captureOpenAICodexTicketFromUpstream(request *htt
 		ObservedAt:   now,
 		NextProbeAt:  ticket.ExpiresAt.Add(-refreshBefore),
 	}
-	s.storeOpenAICodexTicketWithObservation(context.WithoutCancel(request.Context()), account, ticket, observation)
+	if err := s.storeOpenAICodexTicketWithObservation(context.WithoutCancel(request.Context()), account, ticket, observation); err != nil {
+		logger.L().Warn("openai_codex_ticket capture persist failed",
+			zap.Int64("account_id", account.ID),
+			zap.String("model", model),
+			zap.Error(err),
+		)
+		return
+	}
 	logger.L().Info("openai_codex_ticket captured from production response",
 		zap.Int64("account_id", account.ID),
 		zap.String("model", model),
