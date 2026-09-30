@@ -1,5 +1,16 @@
 # Tuava upstream update workflow
 
+## Current synchronized baseline
+
+- Target official release: `v0.2.10`.
+- Official commit: `2f3fed2fdb0787141294cec81487a5df30426f7f`.
+- Last published Tuava release before this sync: `v0.2.7-tuava.5`.
+- First release after this sync: `v0.2.10-tuava.1`.
+
+An upstream-sync branch intentionally keeps `backend/cmd/server/VERSION` at the last published
+Tuava version. The release workflow derives the build version from the new tag and then synchronizes
+the VERSION file on `main`; do not claim `v0.2.10-tuava.1` before that release succeeds.
+
 This fork keeps the official repository as `upstream` and stores Tuava changes as a small commit stack on top of the official branch.
 
 ## Branch model
@@ -32,7 +43,7 @@ From a clean Tuava branch:
 Or pin a release:
 
 ```bash
-./tools/update-upstream.sh v0.2.7
+./tools/update-upstream.sh v0.2.10
 ```
 
 The script fetches official refs, creates an archive branch, and rebases only the Tuava commit stack. Git `rerere` is enabled so previously resolved conflicts can be reused.
